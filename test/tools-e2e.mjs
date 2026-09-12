@@ -340,6 +340,136 @@ console.log('— 删除复核窗口 —')
   await slowMock.close()
 }
 
+// ── 取消（abort）────────────────────────────────────────────────────────────
+
+// B1 回归：工具被取消时必须及时中断。改前 signal 只在入口检查一次、sleep 不可取消，
+// 所以取消发生在删除复核轮询期间时毫无作用——工具会把整个复核预算（最长 6 秒）跑完
+// 再返回「已删除」。
+console.log('— 取消（abort）—')
+{
+  const abortMock = await startMockSiYuan({ deleteDelayMs: 3000 })
+  const abortHome = TEST_HOME + '-abort'
+  fs.mkdirSync(`${abortHome}/storages/siyuan`, { recursive: true })
+  fs.writeFileSync(
+    `${abortHome}/storages/siyuan/config.json`,
+    JSON.stringify({ baseUrl: abortMock.baseUrl, defaultNotebook: 'nb-inbox', tools: { read: true, write: true, daily: true, danger: true } }),
+  )
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = abortHome
+
+  const abortRegistered = new Map()
+  const abortInject = {
+    get: (name) => (name === 'credentials' ? { resolve: async () => ({ value: abortMock.token, source: 'store' }), describe: async () => ({ configured: true, writable: true }) } : undefined),
+    effect: (callback) => {
+      callback()
+      return () => {}
+    },
+    logger: { info: () => {}, warn: () => {} },
+    tools: { register: (definition) => { abortRegistered.set(definition.name, definition); return () => abortRegistered.delete(definition.name) } },
+    webServer: { register: () => () => {} },
+  }
+  const abortOuter = {
+    get: abortInject.get,
+    effect: abortInject.effect,
+    logger: abortInject.logger,
+    inject: (_deps, callback) => callback(abortInject),
+    get tools() { throw new Error('cannot get property "tools" without inject') },
+    get webServer() { throw new Error('cannot get property "webServer" without inject') },
+  }
+  const abortPlugin = await loadPlugin()
+  abortPlugin.apply(abortOuter)
+
+  const abortDocId = abortMock.seedDoc()
+  const controller = new AbortController()
+  setTimeout(() => controller.abort(), 300)
+  const abortStartedAt = Date.now()
+  const abortedCall = await (async () => {
+    try {
+      const value = await abortRegistered.get('siyuan_remove_doc').execute({ docId: abortDocId, confirm: true }, { signal: controller.signal })
+      return { ok: true, text: value.result, name: '' }
+    } catch (error) {
+      return { ok: false, text: error?.message ?? String(error), name: error?.name ?? '' }
+    }
+  })()
+  const abortElapsed = Date.now() - abortStartedAt
+
+  check('取消后删除工具立刻抛错', abortedCall.ok === false, abortedCall.text)
+  check('取消抛出的是 AbortError（官方包装成 ABORTED 的契约）', abortedCall.name === 'AbortError', abortedCall.name || '(空)')
+  check('取消后不等复核预算跑完（< 1 秒）', abortElapsed < 1000, `${abortElapsed}ms`)
+
+  const freshAbortPlugins = await loadPlugin()
+  const preAborted = new AbortController()
+  preAborted.abort()
+  let entryError = null
+  try {
+    await abortRegistered.get('siyuan_list_notebooks').execute({}, { signal: preAborted.signal })
+  } catch (error) {
+    entryError = error
+  }
+  check('入口即已取消时也抛 AbortError', entryError !== null && entryError.name === 'AbortError', entryError === null ? '未抛错' : entryError.name)
+  check('入口取消不发出任何请求', abortMock.requestsTo('/api/notebook/lsNotebooks').length === 0, String(abortMock.requestsTo('/api/notebook/lsNotebooks').length))
+
+  const sleepAbort = new AbortController()
+  setTimeout(() => sleepAbort.abort(), 50)
+  const sleepStartedAt = Date.now()
+  let sleepRejected = ''
+  try {
+    await freshAbortPlugins.internals.sleepAbortable(5000, sleepAbort.signal)
+  } catch (error) {
+    sleepRejected = error?.name ?? String(error)
+  }
+  check('可中断 sleep 在取消时立刻结束', sleepRejected === 'AbortError' && Date.now() - sleepStartedAt < 1000, `${sleepRejected} / ${Date.now() - sleepStartedAt}ms`)
+
+  // 取消发生在「一次请求正在路上」时：只有请求本身带上取消信号才能立刻结束，
+  // 否则要等这次响应回来（下面配的是 3 秒）才能轮询到下一个检查点。
+  const stalledHome = TEST_HOME + '-stalled'
+  fs.rmSync(stalledHome, { recursive: true, force: true })
+  fs.mkdirSync(`${stalledHome}/storages/siyuan`, { recursive: true })
+  const stalledMock = await startMockSiYuan({ responseDelayMs: 3000 })
+  fs.writeFileSync(
+    `${stalledHome}/storages/siyuan/config.json`,
+    JSON.stringify({ baseUrl: stalledMock.baseUrl, defaultNotebook: 'nb-inbox', tools: { read: true, write: true, daily: true, danger: true } }),
+  )
+  process.env.DSH_HOME = stalledHome
+  const stalledRegistered = new Map()
+  const stalledInject = {
+    get: (name) => (name === 'credentials' ? { resolve: async () => ({ value: stalledMock.token, source: 'store' }), describe: async () => ({ configured: true, writable: true }) } : undefined),
+    effect: (callback) => {
+      callback()
+      return () => {}
+    },
+    logger: { info: () => {}, warn: () => {} },
+    tools: { register: (definition) => { stalledRegistered.set(definition.name, definition); return () => stalledRegistered.delete(definition.name) } },
+    webServer: { register: () => () => {} },
+  }
+  const stalledPlugin = await loadPlugin()
+  stalledPlugin.apply({
+    get: stalledInject.get,
+    effect: stalledInject.effect,
+    logger: stalledInject.logger,
+    inject: (_deps, callback) => callback(stalledInject),
+    get tools() { throw new Error('cannot get property "tools" without inject') },
+    get webServer() { throw new Error('cannot get property "webServer" without inject') },
+  })
+
+  const stalledController = new AbortController()
+  setTimeout(() => stalledController.abort(), 300)
+  const stalledStartedAt = Date.now()
+  let stalledName = ''
+  try {
+    await stalledRegistered.get('siyuan_list_notebooks').execute({}, { signal: stalledController.signal })
+  } catch (error) {
+    stalledName = error?.name ?? ''
+  }
+  const stalledElapsed = Date.now() - stalledStartedAt
+  check('请求进行中取消会立刻中止该请求', stalledName === 'AbortError' && stalledElapsed < 1500, `${stalledName} / ${stalledElapsed}ms（请求响应延迟 3000ms）`)
+  process.env.DSH_HOME = previousHome
+  await stalledMock.close()
+
+  process.env.DSH_HOME = previousHome
+  await abortMock.close()
+}
+
 // ── 鉴权与请求体 ────────────────────────────────────────────────────────────
 
 console.log('— 请求面 —')

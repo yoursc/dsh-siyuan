@@ -14,7 +14,7 @@
 
 import http from 'node:http'
 
-export async function startMockSiYuan({ token = 'test-token', deleteDelayMs = 0 } = {}) {
+export async function startMockSiYuan({ token = 'test-token', deleteDelayMs = 0, responseDelayMs = 0 } = {}) {
   const state = {
     notebooks: [
       {
@@ -286,28 +286,45 @@ export async function startMockSiYuan({ token = 'test-token', deleteDelayMs = 0 
         response.end(JSON.stringify({ code, msg, data: data ?? null }))
       }
 
-      if (pathname === '/api/system/version' || pathname === '/api/system/bootProgress') {
-        reply(0, '', handlers[pathname](payload))
-        return
+      // 可选：整体延后响应，用来复现「请求还在路上时工具被取消」。
+      // 连接被客户端 abort 后 writeHead 会抛 ERR_STREAM_DESTROYED，这里吞掉即可。
+      if (responseDelayMs > 0) {
+        setTimeout(() => {
+          try {
+            dispatch()
+          } catch {
+            // 客户端已断开
+          }
+        }, responseDelayMs)
+      } else {
+        dispatch()
       }
-      if (!authorized) {
-        reply(-1, 'Auth failed', null)
-        return
-      }
-      if (pathname === '/api/not-json') {
-        response.writeHead(200, { 'Content-Type': 'text/plain' })
-        response.end('<html>nope</html>')
-        return
-      }
-      const handler = handlers[pathname]
-      if (handler === undefined) {
-        reply(-1, `mock has no handler for ${pathname}`, null)
-        return
-      }
-      try {
-        reply(0, '', handler(payload))
-      } catch (error) {
-        reply(-1, error?.message ?? String(error), null)
+      return
+
+      function dispatch() {
+        if (pathname === '/api/system/version' || pathname === '/api/system/bootProgress') {
+          reply(0, '', handlers[pathname](payload))
+          return
+        }
+        if (!authorized) {
+          reply(-1, 'Auth failed', null)
+          return
+        }
+        if (pathname === '/api/not-json') {
+          response.writeHead(200, { 'Content-Type': 'text/plain' })
+          response.end('<html>nope</html>')
+          return
+        }
+        const handler = handlers[pathname]
+        if (handler === undefined) {
+          reply(-1, `mock has no handler for ${pathname}`, null)
+          return
+        }
+        try {
+          reply(0, '', handler(payload))
+        } catch (error) {
+          reply(-1, error?.message ?? String(error), null)
+        }
       }
     })
   })
