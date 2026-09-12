@@ -66,7 +66,14 @@ const hostState = {
   reachable: true,
   version: '3.8.3',
   toolGroups: ['read', 'write', 'daily', 'danger'],
-  toolNames: ['siyuan_list_notebooks', 'siyuan_search', 'siyuan_sql', 'siyuan_read_doc', 'siyuan_list_docs', 'siyuan_get_child_blocks', 'siyuan_get_block_attrs', 'siyuan_create_doc', 'siyuan_append_block', 'siyuan_insert_block', 'siyuan_update_block', 'siyuan_set_block_attrs', 'siyuan_move_doc', 'siyuan_rename_doc', 'siyuan_daily_note', 'siyuan_delete_block', 'siyuan_remove_doc'].map((name) => ({ name, group: 'read' })),
+  // 与宿主 statePayload 同形状：每组的数量必须和 lib/index.js 的实际分组一致
+  // （read 7 / write 7 / daily 1 / danger 2 = 17），否则「已启用 N」会算错。
+  toolNames: [
+    ...Array.from({ length: 7 }, (_, i) => ({ name: `siyuan_read_${i}`, group: 'read' })),
+    ...Array.from({ length: 7 }, (_, i) => ({ name: `siyuan_write_${i}`, group: 'write' })),
+    ...Array.from({ length: 1 }, (_, i) => ({ name: `siyuan_daily_${i}`, group: 'daily' })),
+    ...Array.from({ length: 2 }, (_, i) => ({ name: `siyuan_danger_${i}`, group: 'danger' })),
+  ],
 }
 const draftState = {
   baseUrl: hostState.config.baseUrl,
@@ -88,13 +95,22 @@ const probeState = {
   ],
 }
 
-stateOverrides = [hostState, draftState, notebooks, '', null, probeState, false]
-stateIndex = 0
-
 // ── 元素树遍历 ─────────────────────────────────────────────────────────────
 
-const textParts = []
-const elements = []
+let textParts = []
+let elements = []
+
+/** 每次渲染前重置 hook 游标与收集数组，并清掉上一轮注入。 */
+function startRender(overrides = []) {
+  stateOverrides = overrides
+  stateIndex = 0
+  textParts = []
+  elements = []
+}
+
+function collectText() {
+  return textParts.join(' | ')
+}
 
 function walk(node) {
   if (node === null || node === undefined || typeof node === 'boolean') return
@@ -119,6 +135,7 @@ function walk(node) {
 
 let tree
 try {
+  startRender([hostState, draftState, notebooks, '', null, probeState, false])
   tree = registered.component({ close: noop })
   walk(tree)
   check('已加载状态渲染不抛错', true)
@@ -126,7 +143,7 @@ try {
   check('已加载状态渲染不抛错', false, error.message)
 }
 
-const text = textParts.join(' | ')
+const text = collectText()
 const inputs = elements.filter((element) => element.type === 'input')
 const checkboxes = inputs.filter((element) => element.props.type === 'checkbox')
 const selects = elements.filter((element) => element.type === 'select')
@@ -154,7 +171,26 @@ check('read/write/daily 勾选、danger 未勾选', (() => {
   return checked.filter(Boolean).length === 3 && checked[3] === false
 })(), JSON.stringify(checkboxes.map((element) => element.props.checked)))
 check('全开/全关按钮存在', buttons.some((element) => /全关/.test(String(element.children?.[0]))) && buttons.some((element) => /全开/.test(String(element.children?.[0]))))
-check('显示工具总数 17', /当前共 17 个工具定义/.test(text), text.slice(-200))
+// 期望值从夹具推导：read 7 + write 7 + daily 1 = 15（danger 未勾选）。
+const expectedEnabled = hostState.toolNames.filter((entry) => draftState.tools[entry.group] === true).length
+check('显示已启用数/总数，而不是固定 17', text.includes(`已启用 ${expectedEnabled} / 共 17 个工具定义`) && !/当前共 17 个工具定义/.test(text), `${expectedEnabled} | ${text.slice(-120)}`)
+
+// B3 回归：计数必须由「宿主的每组清单 × 表单当前勾选」算出，不是写死的数字。
+console.log('— 工具计数随 draft 变化 —')
+{
+  const renderWithTools = (tools) => {
+    startRender([hostState, { ...draftState, tools }, notebooks, '', null, probeState, false])
+    const nextTree = registered.component({ close: noop })
+    walk(nextTree)
+    return collectText()
+  }
+  const onlyRead = renderWithTools({ read: true, write: false, daily: false, danger: false })
+  check('只开 read 时显示已启用 7', /已启用 7 \/ 共 17 个工具定义/.test(onlyRead), onlyRead.slice(-160))
+  const dangerOn = renderWithTools({ read: true, write: true, daily: true, danger: true })
+  check('全开时显示已启用 17', /已启用 17 \/ 共 17 个工具定义/.test(dangerOn), dangerOn.slice(-160))
+  const allOff = renderWithTools({ read: false, write: false, daily: false, danger: false })
+  check('全关时显示已启用 0', /已启用 0 \/ 共 17 个工具定义/.test(allOff), allOff.slice(-160))
+}
 
 console.log('— 连接测试结果 —')
 check('三条探测都渲染', /系统版本/.test(text) && /列出笔记本/.test(text) && /SQL 查询/.test(text))
