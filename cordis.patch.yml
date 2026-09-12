@@ -1,0 +1,12 @@
+# dsh-siyuan bundle patch
+#
+# 本文件是发布用（`dsh plugin --profile <name> add @yoursc/dsh-siyuan`）的 `dsh.bundle.patch`
+# 层：装上包并把它加进 `dsh.profile.bundles` 后，profile 启动会合并这份 patch，
+# 等价于手写下面这行 mount。
+#
+# 本地开发（手工挂载）时不需要它：直接把包软链进
+# `$DSH_HOME/profiles/web/node_modules/`，再在 profile 自己的
+# `cordis.patch.yml` 里写同样的 insert 行即可。
+- insert:
+    - id: siyuan
+      name: '@yoursc/dsh-siyuan'

@@ -1,0 +1,77 @@
+{
+  "name": "@yoursc/dsh-siyuan",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness plugin: SiYuan (思源笔记) integration — host-side siyuan_* tools for search/read/write plus a dedicated settings page in the Web client.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "engines": {
+      "dsh": ">=0.1.2-rc.1"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "dshhub": {
+    "schemaVersion": 1,
+    "displayName": "dsh-siyuan",
+    "summary": "把思源笔记接入 DeepSeek Harness：17 个 siyuan_* 工具（检索/读取/写入/移动/删除/日记/属性）+ 独立设置页，token 存宿主凭据库，工具按分组开关。",
+    "categories": [
+      "知识库",
+      "Web UI"
+    ],
+    "surfaces": [
+      "host",
+      "web"
+    ],
+    "capabilities": {
+      "provides": [
+        "service:siyuan"
+      ]
+    },
+    "compatibility": {
+      "dsh": ">=0.1.2-rc.1",
+      "node": ">=20"
+    }
+  },
+  "scripts": {
+    "test": "node test/harness.mjs && node test/tools-e2e.mjs && node test/client-harness.mjs && node test/client-render.mjs"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "siyuan",
+    "思源笔记",
+    "notes",
+    "knowledge-base",
+    "web"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-tools": "^0.1.5-rc.1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yoursc/dsh-siyuan.git"
+  },
+  "homepage": "https://github.com/yoursc/dsh-siyuan#readme",
+  "bugs": {
+    "url": "https://github.com/yoursc/dsh-siyuan/issues"
+  },
+  "license": "MIT"
+}
