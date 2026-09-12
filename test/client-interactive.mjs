@@ -90,7 +90,18 @@ host.apply({
   },
 })
 
+// 夹具来自宿主真实产出（internals.buildStatePayload）。C5：buildStatePayload 会真实
+// 探测 config.baseUrl（本文件写的是 127.0.0.1:6806），本机恰好跑着思源时测试会打到
+// **真实实例**。生成夹具前临时换成必败 fetch，让探测不出网；计数器断言探测被替身接住。
+const realFetch = globalThis.fetch
+let probeHits = 0
+globalThis.fetch = async () => {
+  probeHits += 1
+  throw new TypeError('probe disabled by test')
+}
 const realState = await host.internals.buildStatePayload(stateCtx, registeredTools)
+globalThis.fetch = realFetch
+check('夹具生成未探测真实实例（探测被必败 fetch 替身接住）', probeHits >= 1, String(probeHits))
 const realGroups = [...new Set(realState.toolNames.map((entry) => entry.group))].sort()
 // 注册的只有默认开启的三组（15 个）；工具总数由全部定义决定，与开关无关。
 check('工具定义含分组信息（read/write 各 7、daily 1）', realGroups.join(',') === 'daily,read,write' && realState.toolNames.length === 15, `${realState.toolNames.length} / ${JSON.stringify(realGroups)}`)

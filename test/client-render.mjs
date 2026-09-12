@@ -100,10 +100,20 @@ hostModule.apply({
     throw new Error('cannot get property "webServer" without inject')
   },
 })
+// C5：buildStatePayload 会真实探测 config.baseUrl（127.0.0.1:6806）——本机恰好
+// 跑着思源时测试会打到**真实实例**。生成夹具前临时换成必败 fetch，探测不出网。
+const realFetch = globalThis.fetch
+let probeHits = 0
+globalThis.fetch = async () => {
+  probeHits += 1
+  throw new TypeError('probe disabled by test')
+}
 const hostPayload = await hostModule.internals.buildStatePayload(
   { get: () => undefined, logger: { info: () => {}, warn: () => {} } },
   hostTools,
 )
+globalThis.fetch = realFetch
+check('夹具生成未探测真实实例（探测被必败 fetch 替身接住）', probeHits >= 1, String(probeHits))
 
 const hostState = {
   ...hostPayload,

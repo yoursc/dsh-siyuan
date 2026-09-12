@@ -310,12 +310,27 @@ console.log('— 路由：配置损坏不静默 —')
     return { status: response.status, payload: JSON.parse(response.body) }
   }
   const warnedBefore = warnings.filter((line) => line.includes('配置文件损坏')).length
+  // C5：坏配置回退默认地址 127.0.0.1:6806，而 getState 会顺带探测 /api/system/version
+  // ——本机恰好跑着思源时，这条探测会打到**真实实例**。替身模式下换成必败 fetch
+  //（计数器断言探测确实没出网）；--live 模式保留真实探测，那本来就是它的用途。
+  const realFetch = globalThis.fetch
+  let probeHits = 0
+  if (mock !== null) {
+    globalThis.fetch = async () => {
+      probeHits += 1
+      throw new TypeError('probe disabled by test (mock mode)')
+    }
+  }
   const corrupted = await callCorrupt()
   check('损坏的配置不会让 getState 失败（回退默认值）', corrupted.payload?.ok === true && corrupted.payload?.value?.config?.baseUrl === 'http://127.0.0.1:6806', JSON.stringify(corrupted.payload?.value?.config))
   const corruptWarnings = warnings.filter((line) => line.includes('配置文件损坏'))
   check('损坏的配置会留下告警', corruptWarnings.length > warnedBefore && corruptWarnings.some((line) => line.includes(CONFIG_FILE)), JSON.stringify(corruptWarnings))
   await callCorrupt()
   check('同一份坏文件只告警一次', warnings.filter((line) => line.includes('配置文件损坏')).length === warnedBefore + 1, JSON.stringify(warnings.filter((line) => line.includes('配置文件损坏'))))
+  if (mock !== null) {
+    check('坏配置的可达性探测未出网（走必败 fetch 替身）', probeHits >= 2, String(probeHits))
+    globalThis.fetch = realFetch
+  }
   fs.rmSync(CONFIG_FILE, { force: true })
 }
 
