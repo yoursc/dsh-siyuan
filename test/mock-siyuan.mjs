@@ -345,6 +345,12 @@ export async function startMockSiYuan({ token = 'test-token', deleteDelayMs = 0,
     requestsTo(path) {
       return state.requests.filter((entry) => entry.path === path)
     },
+    /** 把某个笔记本标成关闭/打开，用于验证「已关闭笔记本」的错误面。 */
+    setNotebookClosed(id, closed = true) {
+      const notebook = state.notebooks.find((item) => item.id === id)
+      if (notebook === undefined) throw new Error(`no such notebook in mock: ${id}`)
+      notebook.closed = closed === true
+    },
     close() {
       return new Promise((resolve) => server.close(resolve))
     },

@@ -106,6 +106,15 @@ const sql = await callTool('siyuan_sql', { stmt: 'SELECT 1 AS ok' })
 check('sql 执行 SELECT 并回 JSON', sql.ok && /"ok": 1/.test(sql.text), sql.text)
 const badSql = await callTool('siyuan_sql', { stmt: 'DELETE FROM blocks' })
 check('sql 拒绝非 SELECT', badSql.ok === false && /只允许 SELECT/.test(badSql.text), badSql.text)
+// B4 回归：只判首词会放过以 select 开头的多语句。
+const multiSql = await callTool('siyuan_sql', { stmt: 'SELECT 1 AS ok; DELETE FROM blocks' })
+check('sql 拒绝分号分隔的多语句', multiSql.ok === false && /单条 SELECT/.test(multiSql.text), multiSql.text)
+const trailingSql = await callTool('siyuan_sql', { stmt: 'SELECT 1 AS ok;' })
+check('sql 允许结尾单个分号', trailingSql.ok && /"ok": 1/.test(trailingSql.text), trailingSql.text)
+const emptySql = await callTool('siyuan_sql', { stmt: '   ' })
+check('sql 拒绝空语句', emptySql.ok === false && /不能为空/.test(emptySql.text), emptySql.text)
+const onlySemicolonSql = await callTool('siyuan_sql', { stmt: ';;' })
+check('sql 拒绝只有分号的语句', onlySemicolonSql.ok === false && /不能只有分号/.test(onlySemicolonSql.text), onlySemicolonSql.text)
 
 const readText = await callTool('siyuan_read_doc', { id: docId, format: 'text' })
 check('read_doc(text) 把 DOM 转成保留结构的纯文本', readText.ok && readText.text.includes('# 会议纪要') && readText.text.includes('讨论了排期与预算。') && readText.text.includes('- 第一项') && !readText.text.includes('<'), readText.text)
@@ -144,6 +153,23 @@ const duplicate = await callTool('siyuan_create_doc', { path: '/收件箱/新文
 check('allowDuplicate=true 时才重复创建', duplicate.ok && /已创建文档/.test(duplicate.text), duplicate.text)
 const samePathCount = [...mock.state.docs.values()].filter((doc) => doc.hpath === '/收件箱/新文档').length
 check('同路径确实存在两份（模拟 createDocWithMd 非幂等）', samePathCount === 2, String(samePathCount))
+
+// B5 回归：笔记本必须存在且已打开。改前 assertNotebook 只看"有没有填"，
+// 往不存在的笔记本写会漏到思源那里，报错文案不可读（替身里甚至不会报错）。
+const beforeBadNotebook = mock.requestsTo('/api/filetree/createDocWithMd').length
+const badNotebook = await callTool('siyuan_create_doc', { notebook: 'nb-nope', path: '/收件箱/糟糕', markdown: 'x' })
+check('create_doc 拒绝不存在的笔记本', badNotebook.ok === false && /不存在/.test(badNotebook.text), badNotebook.text)
+check('笔记本不存在时不发 createDocWithMd 请求', mock.requestsTo('/api/filetree/createDocWithMd').length === beforeBadNotebook, String(mock.requestsTo('/api/filetree/createDocWithMd').length - beforeBadNotebook))
+
+const badNotebookDaily = await callTool('siyuan_daily_note', { action: 'append', notebook: 'nb-nope', date: '2026-09-12', markdown: 'x' })
+check('daily_note 也拒绝不存在的笔记本', badNotebookDaily.ok === false && /不存在/.test(badNotebookDaily.text), badNotebookDaily.text)
+
+mock.setNotebookClosed('nb-proj')
+const closedNotebook = await callTool('siyuan_create_doc', { notebook: 'nb-proj', path: '/项目/糟糕', markdown: 'x' })
+check('create_doc 拒绝已关闭的笔记本', closedNotebook.ok === false && /关闭状态/.test(closedNotebook.text), closedNotebook.text)
+mock.setNotebookClosed('nb-proj', false)
+const reopenedNotebook = await callTool('siyuan_create_doc', { notebook: 'nb-proj', path: '/项目/正常', markdown: '# ok' })
+check('笔记本重新打开后可正常创建', reopenedNotebook.ok && /已创建文档/.test(reopenedNotebook.text), reopenedNotebook.text)
 
 const appended = await callTool('siyuan_append_block', { docId, markdown: '追加的结论。' })
 check('append_block 追加到文档末尾', appended.ok && /已追加到文档/.test(appended.text), appended.text)
@@ -258,12 +284,16 @@ check('parseDateArg 省略 date 时用参考日期的当地零点', parseDateArg
 check('parseDateArg 空串回退到参考日期', parseDateArg('   ', reference).getTime() === new Date(2026, 8, 12).getTime())
 check('parseDateArg 接受合法日期', parseDateArg('2026-09-12').getTime() === new Date(2026, 8, 12).getTime())
 
-const beforeBadDate = mock.state.requests.length
+// 只断言「没有写入类请求」：新增的"笔记本必须存在且已打开"预检（B5）会先发一次
+// lsNotebooks，那是设计内行为，不该被这条用例当成违规。
+const writePaths = new Set(['/api/filetree/createDocWithMd', '/api/block/appendBlock', '/api/block/insertBlock', '/api/block/updateBlock'])
+const beforeBadDate = mock.state.requests.filter((entry) => writePaths.has(entry.path)).length
 for (const value of ['abc', '2026-13-45', '2026-02-30']) {
   const bad = await callTool('siyuan_daily_note', { action: 'append', date: value, markdown: '不该写进去' })
   check(`daily_note 非法 date=${value} 时拒绝写入`, bad.ok === false && /date/.test(bad.text), bad.text)
 }
-check('非法 date 不产生任何思源请求', mock.state.requests.length === beforeBadDate, String(mock.state.requests.length - beforeBadDate))
+const writesAfterBadDate = mock.state.requests.filter((entry) => writePaths.has(entry.path)).length
+check('非法 date 不产生任何写入请求', writesAfterBadDate === beforeBadDate, String(writesAfterBadDate - beforeBadDate))
 
 const dailyBefore = await callTool('siyuan_daily_note', { action: 'read', date: '2026-09-12' })
 check('日记不存在时给出路径', dailyBefore.ok && /\/daily note\/2026\/09\/2026-09-12 的日记还不存在/.test(dailyBefore.text), dailyBefore.text)
