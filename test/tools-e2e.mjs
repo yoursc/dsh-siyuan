@@ -153,6 +153,11 @@ check('get_block_attrs 初始为空', attrsEmpty.ok && attrsEmpty.text.includes(
 const missingDoc = await callTool('siyuan_read_doc', { id: 'nope' })
 check('read_doc 对不存在的 id 给出可读错误', missingDoc.ok === false && /没有取到内容/.test(missingDoc.text), missingDoc.text)
 
+// C13：空文档走 markdown 分支时，旧文案把"文档为空"误导成"该 id 是块 id"。
+const emptyDocId = mock.seedDoc({ hpath: '/收件箱/空文档', markdown: '' })
+const readEmptyMd = await callTool('siyuan_read_doc', { id: emptyDocId, format: 'markdown' })
+check('read_doc(markdown) 对空文档不再误导为块 id', readEmptyMd.ok === false && /或文档本身为空/.test(readEmptyMd.text), readEmptyMd.text)
+
 // ── 写入工具 ────────────────────────────────────────────────────────────────
 
 console.log('— 写入组 —')
@@ -255,7 +260,14 @@ check('remove_doc 真删除整篇文档（含块）', rmOk.ok && !mock.state.doc
 check('删除的文档不再出现在列表里', mock.requestsTo('/api/filetree/removeDocByID').length === 1, String(mock.requestsTo('/api/filetree/removeDocByID').length))
 
 const rmMissing = await callTool('siyuan_remove_doc', { docId: 'doc-nope', confirm: true })
-check('remove_doc 对不存在的 id 报错', rmMissing.ok === false && /思源接口/.test(rmMissing.text), rmMissing.text)
+check('remove_doc 对不存在的 id 报错', rmMissing.ok === false && /不存在/.test(rmMissing.text), rmMissing.text)
+
+// C13：remove_doc 预检类型——内容块 id 直接拦下并指路，不再白等 6 秒复核
+// 才报"未生效"（与 delete_block 的预检对齐）。
+const someBlockId = [...mock.state.blocks.values()].find((block) => block.docId === docId && block.markdown === '追加的结论。').id
+const rmContentBlock = await callTool('siyuan_remove_doc', { docId: someBlockId, confirm: true })
+check('remove_doc 拒绝内容块 id 并指向 siyuan_delete_block', rmContentBlock.ok === false && /内容块/.test(rmContentBlock.text) && /siyuan_delete_block/.test(rmContentBlock.text), rmContentBlock.text)
+check('拒绝内容块时不发 removeDocByID 请求', mock.requestsTo('/api/filetree/removeDocByID').every((entry) => entry.payload.id !== someBlockId), JSON.stringify(mock.requestsTo('/api/filetree/removeDocByID').map((entry) => entry.payload.id)))
 
 // ── 文档移动与重命名 ────────────────────────────────────────────────────────
 
@@ -342,6 +354,15 @@ check('已存在的日记走追加而不是重复创建', dailyAppendAgain.ok &&
 
 const dailyMissingMarkdown = await callTool('siyuan_daily_note', { action: 'append', date: '2026-09-12' })
 check('append 缺 markdown 时拒绝', dailyMissingMarkdown.ok === false && /必须提供 markdown/.test(dailyMissingMarkdown.text), dailyMissingMarkdown.text)
+
+// C13：同一路径堆出多篇日记时（createDocWithMd 非幂等的历史遗留），read/append
+// 只操作第一篇，必须把"共 N 篇"这件事告诉调用方，不能静默。
+await callTool('siyuan_create_doc', { path: '/daily note/2026/09/2026-09-13', markdown: '# 早班' })
+await callTool('siyuan_create_doc', { path: '/daily note/2026/09/2026-09-13', markdown: '# 晚班', allowDuplicate: true })
+const dailyDupRead = await callTool('siyuan_daily_note', { action: 'read', date: '2026-09-13' })
+check('同路径多篇日记时 read 提示总数并指明只读第一篇', dailyDupRead.ok && /共有 2 篇日记文档/.test(dailyDupRead.text) && /只操作了第一篇/.test(dailyDupRead.text), dailyDupRead.text)
+const dailyDupAppend = await callTool('siyuan_daily_note', { action: 'append', date: '2026-09-13', markdown: '追加到第一篇。' })
+check('同路径多篇日记时 append 也提示', dailyDupAppend.ok && /共有 2 篇日记文档/.test(dailyDupAppend.text) && /追加到了第一篇|只操作了第一篇/.test(dailyDupAppend.text), dailyDupAppend.text)
 
 // ── 删除复核窗口 ────────────────────────────────────────────────────────────
 
