@@ -150,6 +150,12 @@ check('read_doc 对不存在的 id 给出可读错误', missingDoc.ok === false 
 console.log('— 写入组 —')
 const setAttrs = await callTool('siyuan_set_block_attrs', { id: docId, attrs: { 'custom-status': 'done' } })
 check('set_block_attrs 写属性', setAttrs.ok && /已设置/.test(setAttrs.text), setAttrs.text)
+
+// C4 回归：思源对不存在 id 的 setBlockAttrs 会静默 no-op（仍回 code 0），
+// 改前工具照样回「已设置」——假成功，与 update_block/delete_block 的标准不一致。
+const attrsMissing = await callTool('siyuan_set_block_attrs', { id: 'blk-nope', attrs: { 'custom-x': '1' } })
+check('set_block_attrs 目标不存在时报错而不是回成功', attrsMissing.ok === false && /不存在/.test(attrsMissing.text), attrsMissing.text)
+check('目标不存在时不发 setBlockAttrs 请求', mock.requestsTo('/api/attr/setBlockAttrs').every((entry) => entry.payload.id !== 'blk-nope'), JSON.stringify(mock.requestsTo('/api/attr/setBlockAttrs').map((entry) => entry.payload.id)))
 const attrsAfter = await callTool('siyuan_get_block_attrs', { id: docId })
 check('属性可读回（含 custom-*）', attrsAfter.ok && attrsAfter.text.includes('"custom-status": "done"'), attrsAfter.text)
 
