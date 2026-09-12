@@ -31,7 +31,12 @@ fs.writeFileSync(
   JSON.stringify({ baseUrl: mock.baseUrl, defaultNotebook: 'nb-inbox', tools: { read: true, write: true, daily: true, danger: true } })
 )
 
-const plugin = await import('../lib/index.js')
+// 每次加载都带一个新 query，绕开 ESM 模块缓存：插件有模块级状态（配置告警去重），
+// 测试需要拿到互不干扰的新实例。
+let pluginLoadCount = 0
+const loadPlugin = () => import(`../lib/index.js?case=${(pluginLoadCount += 1)}`)
+
+const plugin = await loadPlugin()
 
 const registered = new Map()
 const credentials = {
@@ -261,6 +266,66 @@ check('已存在的日记走追加而不是重复创建', dailyAppendAgain.ok &&
 
 const dailyMissingMarkdown = await callTool('siyuan_daily_note', { action: 'append', date: '2026-09-12' })
 check('append 缺 markdown 时拒绝', dailyMissingMarkdown.ok === false && /必须提供 markdown/.test(dailyMissingMarkdown.text), dailyMissingMarkdown.text)
+
+// ── 删除复核窗口 ────────────────────────────────────────────────────────────
+
+// H5 回归：思源的删除是异步落库的，复核窗口不能太短。
+// 这里用「删除 3 秒后才落库」的替身——它超过旧实现的固定窗口（8 × 250ms = 2 秒），
+// 旧实现会把这次**成功**的删除报成「删除未生效」。
+console.log('— 删除复核窗口 —')
+{
+  const slowMock = await startMockSiYuan({ deleteDelayMs: 3000 })
+  const slowHome = TEST_HOME + '-slow'
+  fs.mkdirSync(`${slowHome}/storages/siyuan`, { recursive: true })
+  fs.writeFileSync(
+    `${slowHome}/storages/siyuan/config.json`,
+    JSON.stringify({ baseUrl: slowMock.baseUrl, defaultNotebook: 'nb-inbox', tools: { read: true, write: true, daily: true, danger: true } }),
+  )
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = slowHome
+
+  const slowRegistered = new Map()
+  const slowInject = {
+    get: (name) => (name === 'credentials' ? { resolve: async () => ({ value: slowMock.token, source: 'store' }), describe: async () => ({ configured: true, writable: true }) } : undefined),
+    effect: (callback) => {
+      callback()
+      return () => {}
+    },
+    logger: { info: () => {}, warn: () => {} },
+    tools: { register: (definition) => { slowRegistered.set(definition.name, definition); return () => slowRegistered.delete(definition.name) } },
+    webServer: { register: () => () => {} },
+  }
+  const slowOuter = {
+    get: slowInject.get,
+    effect: slowInject.effect,
+    logger: slowInject.logger,
+    inject: (_deps, callback) => callback(slowInject),
+    get tools() { throw new Error('cannot get property "tools" without inject') },
+    get webServer() { throw new Error('cannot get property "webServer" without inject') },
+  }
+  const fresh = await loadPlugin()
+  fresh.apply(slowOuter)
+
+  const slowDocId = slowMock.seedDoc()
+  const startedAt = Date.now()
+  const slowDelete = await (async () => {
+    try {
+      const value = await slowRegistered.get('siyuan_remove_doc').execute({ docId: slowDocId, confirm: true }, {})
+      return { ok: true, text: value.result }
+    } catch (error) {
+      return { ok: false, text: error?.message ?? String(error) }
+    }
+  })()
+  const elapsed = Date.now() - startedAt
+
+  check('落库延迟 3 秒时删除仍判定为成功（旧 2 秒窗口会误报失败）', slowDelete.ok === true, slowDelete.text)
+  check('慢删除会告知复核耗时', slowDelete.ok === true && /复核用了 \d+ms/.test(slowDelete.text), slowDelete.text)
+  check('实际等待超过旧的 2 秒窗口', elapsed > 2000, `${elapsed}ms`)
+  check('删除确实落库（替身里已查不到）', slowMock.state.docs.has(slowDocId) === false, slowDocId)
+
+  process.env.DSH_HOME = previousHome
+  await slowMock.close()
+}
 
 // ── 鉴权与请求体 ────────────────────────────────────────────────────────────
 
