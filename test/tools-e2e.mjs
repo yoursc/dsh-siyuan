@@ -159,6 +159,19 @@ check('insert_block 缺少锚点时拒绝', insertMissingAnchor.ok === false && 
 const updated = await callTool('siyuan_update_block', { blockId: firstBlockId, markdown: '# 会议纪要（改）' })
 check('update_block 覆盖块内容', updated.ok && /已更新块/.test(updated.text), updated.text)
 check('改写后 mock 里的块内容已变', mock.state.blocks.get(firstBlockId).markdown === '# 会议纪要（改）', mock.state.blocks.get(firstBlockId).markdown)
+// H6：单段不该出现多段警告
+check('单段更新不带多段警告', updated.ok && !/只写入了第一段/.test(updated.text), updated.text)
+
+// H6 回归：思源 updateBlock 对多段 Markdown 只保留第一段、其余静默丢弃。
+// 改前工具一律回「已更新块」，模型以为多段都写进去了。
+const multiParagraph = await callTool('siyuan_update_block', { blockId: firstBlockId, markdown: '第一段。\n\n第二段。\n\n第三段。' })
+check('多段更新会明确警告只写入第一段', multiParagraph.ok && /只写入了第一段/.test(multiParagraph.text) && /siyuan_insert_block/.test(multiParagraph.text), multiParagraph.text)
+check('多段更新后替身里确实只剩第一段', mock.state.blocks.get(firstBlockId).markdown === '第一段。', mock.state.blocks.get(firstBlockId).markdown)
+
+const updateMissing = await callTool('siyuan_update_block', { blockId: 'blk-nope', markdown: 'x' })
+check('update_block 目标不存在时报错而不是回成功', updateMissing.ok === false && /不存在/.test(updateMissing.text), updateMissing.text)
+// 走的是工具自己的存在性预检，不该把请求打到思源
+check('目标不存在时不发 updateBlock 请求', mock.requestsTo('/api/block/updateBlock').every((entry) => entry.payload.id !== 'blk-nope'), JSON.stringify(mock.requestsTo('/api/block/updateBlock').map((entry) => entry.payload.id)))
 
 const delRefused = await callTool('siyuan_delete_block', { blockId: firstBlockId, confirm: false })
 check('delete_block 未确认时拒绝', delRefused.ok === false && /confirm=true/.test(delRefused.text), delRefused.text)
