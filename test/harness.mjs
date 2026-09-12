@@ -208,6 +208,12 @@ console.log('— 路由：基础分支 —')
   const sameOrigin = await call('getState', {}, { headers: { host: '127.0.0.1:3080', origin: 'http://127.0.0.1:3080' } })
   check('origin 与 Host 一致放行', sameOrigin.status === 200, JSON.stringify(sameOrigin.payload).slice(0, 120))
 
+  // C10 回归：origin 比较必须含端口。同机同 hostname 不同端口的服务
+  //（127.0.0.1:9999 对 dsh 的 127.0.0.1:3080）origin 的 hostname 与 Host 相同，
+  // 只比 hostname 会把它当同源放行——包括 setToken 在内的全部路由。
+  const crossPortOrigin = await call('getState', {}, { headers: { host: '127.0.0.1:3080', origin: 'http://127.0.0.1:9999' } })
+  check('同 hostname 不同端口的 origin 被拒 (403)', crossPortOrigin.status === 403, JSON.stringify(crossPortOrigin.payload))
+
   const noHost = await call('getState', {}, { headers: {} })
   check('缺少 Host 头被拒 (403)', noHost.status === 403, JSON.stringify(noHost.payload))
 
