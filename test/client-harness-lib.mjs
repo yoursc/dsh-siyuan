@@ -81,15 +81,23 @@ export function createHooks({ disableEffects = false } = {}) {
     effects.splice(0)
   }
 
-  /** 挂载后执行 effect 提交的函数，并等待它们返回的 promise（组件里的 load 是 async）。 */
+  /**
+   * 挂载后执行待提交的 effect 并等异步链跑完。
+   *
+   * C8：effect 按 React 契约不再返回 promise，这里改为排干微任务——组件里的
+   * load → fetch → setState 全是微任务链（fetch 替身是 async 函数 / Response.json），
+   * 一次 macrotask 间隙内必然完成，setImmediate 两轮即充分。
+   * `lastEffectReturn` 记录最近一个 effect 的返回值，供「不得返回 promise」的守卫断言。
+   */
+  let lastEffectReturn
   async function flushEffects() {
     if (disableEffects) return
-    const pending = []
     for (const effect of pendingEffects.splice(0)) {
-      const result = effect()
-      pending.push(result !== undefined && typeof result.then === 'function' ? result : Promise.resolve())
+      lastEffectReturn = effect()
     }
-    await Promise.all(pending)
+    for (let round = 0; round < 2; round += 1) {
+      await new Promise((resolve) => setImmediate(resolve))
+    }
   }
 
   return {
@@ -101,6 +109,9 @@ export function createHooks({ disableEffects = false } = {}) {
     markEffectsPending,
     discardEffects,
     flushEffects,
+    get lastEffectReturn() {
+      return lastEffectReturn
+    },
     get renderCount() {
       return renderCount
     },

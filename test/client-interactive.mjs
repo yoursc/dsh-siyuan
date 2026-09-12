@@ -235,6 +235,9 @@ console.log('— 加载路径 —')
   mountRender()
   check('未加载时渲染加载态', /正在读取配置/.test(textOf()), textOf())
   await runtime.flushEffects()
+  // C8 守卫：effect 的返回值必须是 undefined。React 契约只允许 effect 返回清理函数
+  // 或 undefined，返回 promise 会在 dev 构建触发控制台报错、生产行为未定义。
+  check('挂载 effect 返回 undefined（不得返回 promise）', runtime.lastEffectReturn === undefined, String(runtime.lastEffectReturn))
   const loaded = textOf()
   check('挂载时自动调用宿主 getState 一次', callsOf(stub, 'getState').length === 1, JSON.stringify(stub.calls))
   check('请求体是空对象', JSON.stringify(callsOf(stub, 'getState')[0]?.body) === '{}', JSON.stringify(callsOf(stub, 'getState')[0]?.body))

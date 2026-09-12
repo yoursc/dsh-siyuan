@@ -1,5 +1,5 @@
 /**
- * dsh-siyuan 工具端到端测试：对着本地思源替身（test/mock-siyuan.mjs）跑通全部 14 个
+ * dsh-siyuan 工具端到端测试：对着本地思源替身（test/mock-siyuan.mjs）跑通全部 17 个
  * 工具，包括写入与日记路径解析，因此不需要真实 token、也不动真实笔记库。
  *
  * 用法：node test/tools-e2e.mjs
