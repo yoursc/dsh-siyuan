@@ -117,13 +117,24 @@ let stateForFetch = realState
  * 用真实的 Response 对象，让 `response.json()` 的行为与线上一致。
  * `overrides[method]` 支持：`{ok:false,message}`（宿主错误信封）、`{rawText}`（非 JSON）、
  * `{value}`（自定义成功值）、`{httpStatus}`（HTTP 层失败）。
+ * `network`：fetch 直接网络失败；`timeout`：抛 TimeoutError（模拟 AbortSignal.timeout
+ * 超时，C11）。每个调用记录 `hasSignal`（C11 守卫：api() 必须给 fetch 挂超时 signal）。
  */
-function createFetchStub({ overrides = {}, network = false } = {}) {
+function createFetchStub({ overrides = {}, network = false, timeout = false } = {}) {
   const calls = []
   const stub = async (url, init) => {
     const method = String(url).replace('/siyuan/api/', '')
-    calls.push({ method, body: init?.body === undefined ? undefined : JSON.parse(init.body) })
+    calls.push({
+      method,
+      body: init?.body === undefined ? undefined : JSON.parse(init.body),
+      hasSignal: init?.signal instanceof AbortSignal,
+    })
     if (network) throw new TypeError('fetch failed')
+    if (timeout) {
+      const timeoutError = new Error('The operation was aborted due to timeout')
+      timeoutError.name = 'TimeoutError'
+      throw timeoutError
+    }
     const override = overrides[method]
     if (override !== undefined) {
       if (override.rawText !== undefined) return new Response(override.rawText, { status: override.status ?? 200 })
@@ -238,6 +249,8 @@ console.log('— 加载路径 —')
   // C8 守卫：effect 的返回值必须是 undefined。React 契约只允许 effect 返回清理函数
   // 或 undefined，返回 promise 会在 dev 构建触发控制台报错、生产行为未定义。
   check('挂载 effect 返回 undefined（不得返回 promise）', runtime.lastEffectReturn === undefined, String(runtime.lastEffectReturn))
+  // C11 守卫：api() 必须给 fetch 挂超时 signal（兜底超时的前提）。
+  check('api() 的 fetch 带超时取消信号', callsOf(stub, 'getState')[0]?.hasSignal === true, JSON.stringify(callsOf(stub, 'getState')[0]))
   const loaded = textOf()
   check('挂载时自动调用宿主 getState 一次', callsOf(stub, 'getState').length === 1, JSON.stringify(stub.calls))
   check('请求体是空对象', JSON.stringify(callsOf(stub, 'getState')[0]?.body) === '{}', JSON.stringify(callsOf(stub, 'getState')[0]?.body))
@@ -268,6 +281,13 @@ console.log('— 错误态 —')
   startCase({ network: true })
   await mount()
   check('网络失败时显示错误而不是崩', /读取配置失败/.test(textOf()), textOf().slice(0, 160))
+}
+{
+  // C11：AbortSignal.timeout 超时抛 TimeoutError，api() 要映射成可读文案，
+  // 不能把浏览器原文（"The operation was aborted…"）直接怼给用户。
+  startCase({ timeout: true })
+  await mount()
+  check('请求超时时显示可读文案而不是崩', /请求超时/.test(textOf()), textOf().slice(0, 160))
 }
 
 console.log('— 保存设置 —')
