@@ -15,9 +15,13 @@ const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'sy-tools-'))
 process.env.DSH_HOME = TEST_HOME
 
 const failures = []
-/** 成功时清掉临时 home；失败时保留，便于取证（路径会随失败清单一起打印）。 */
+/** 成功时清掉临时 home（含删除复核/取消/请求中取消三个用例的变体 home）；失败时保留，便于取证。 */
 function cleanupHome() {
-  if (failures.length === 0) fs.rmSync(TEST_HOME, { recursive: true, force: true })
+  if (failures.length === 0) {
+    for (const home of [TEST_HOME, `${TEST_HOME}-slow`, `${TEST_HOME}-abort`, `${TEST_HOME}-stalled`]) {
+      fs.rmSync(home, { recursive: true, force: true })
+    }
+  }
 }
 
 function check(label, condition, detail) {

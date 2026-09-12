@@ -22,6 +22,12 @@ function check(label, condition, detail) {
   }
 }
 
+// C6：临时 home 此前从不清理，每次跑都残留一个 sy-client-render-*（/tmp 已积累 19 个）。
+// 与 harness/tools-e2e 的约定对齐：成功时删、失败时保留便于取证。
+function cleanupHome() {
+  if (failures.length === 0) fs.rmSync(HOST_HOME, { recursive: true, force: true })
+}
+
 let captured = null
 globalThis.window = { __ModuleLoader__: { load: (module) => (captured = module) } }
 
@@ -249,8 +255,9 @@ check('成功项带 ✓、失败项带 ✗', /✓ 系统版本/.test(text) && /�
 console.log('')
 if (failures.length === 0) {
   console.log('全部通过 ✅')
+  cleanupHome()
   process.exit(0)
 }
-console.log(`${failures.length} 项失败：`)
+console.log(`${failures.length} 项失败（临时 home 保留在 ${HOST_HOME}）：`)
 for (const failure of failures) console.log(' - ' + failure)
 process.exit(1)
