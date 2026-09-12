@@ -51,11 +51,15 @@ const loadPlugin = () => import(`../lib/index.js?case=${(pluginLoadCount += 1)}`
 const plugin = await loadPlugin()
 
 const registered = new Map()
+// C12：凭据调用计数——工具调用路径只应 resolve（取值），不应 describe（元数据只有设置页需要）。
+const credentialCalls = { describe: 0, resolve: 0 }
 const credentials = {
   async describe() {
+    credentialCalls.describe += 1
     return { configured: true, source: 'store', writable: true }
   },
   async resolve() {
+    credentialCalls.resolve += 1
     return { value: mock.token, source: 'store' }
   },
   async set() {},
@@ -605,6 +609,11 @@ console.log('— 日记路径渲染 —')
 // ── 鉴权与请求体 ────────────────────────────────────────────────────────────
 
 console.log('— 请求面 —')
+// C12 回归：工具调用路径只取 token 值。改前 createApi 走 tokenState，
+// 每次工具调用都为用不到的元数据多付一次凭据库 describe。
+check('工具调用不触发凭据 describe（元数据只有设置页需要）', credentialCalls.describe === 0, JSON.stringify(credentialCalls))
+check('工具调用照常 resolve token', credentialCalls.resolve > 0, JSON.stringify(credentialCalls))
+
 const unauthenticated = mock.state.requests.filter((entry) => entry.path !== '/api/system/version' && entry.authorized !== true)
 check('除公开接口外每个请求都带 Token 头', unauthenticated.length === 0, JSON.stringify(unauthenticated.slice(0, 2)))
 
