@@ -25,12 +25,13 @@ delete process.env.SIYUAN_TOKEN
 const TEST_HOME = '/tmp/sy-harness-home'
 fs.rmSync(TEST_HOME, { recursive: true, force: true })
 process.env.DSH_HOME = TEST_HOME
+// 目录先建好：下面的「损坏配置」用例要直接写这个文件，两种模式下都得存在。
+fs.mkdirSync(TEST_HOME + '/storages/siyuan', { recursive: true })
 
 const mock = LIVE ? null : await startMockSiYuan()
 const DEFAULT_BASE = LIVE ? 'http://127.0.0.1:6806' : mock.baseUrl
 // 替身的 token 走凭据假件提供；未配置分支在「凭据路径」段落里用独立实例覆盖。
 if (mock !== null) {
-  fs.mkdirSync(TEST_HOME + '/storages/siyuan', { recursive: true })
   fs.writeFileSync(
     TEST_HOME + '/storages/siyuan/config.json',
     JSON.stringify({ baseUrl: mock.baseUrl, defaultNotebook: '', tools: { read: true, daily: true } }),
@@ -67,6 +68,7 @@ const routes = []
 const disposers = []
 let disposeCount = 0
 
+const warnings = []
 const ctx = {
   get: () => undefined,
   effect: (callback) => {
@@ -74,7 +76,7 @@ const ctx = {
     if (typeof dispose === 'function') disposers.push(dispose)
     return () => {}
   },
-  logger: { info: () => {} },
+  logger: { info: () => {}, warn: (message) => warnings.push(String(message)) },
 }
 // cordis 语义：只有声明了 inject 的上下文才能读服务属性。这里让「未注入的外层
 // 上下文」在被读 tools/webServer 时抛错，从而复现真实约束；注入回调拿到的是
@@ -200,6 +202,19 @@ console.log('— 路由：getState / updateConfig —')
   check('token 未配置', state.payload?.value?.token?.configured === false, JSON.stringify(state.payload?.value?.token))
   check('预置的 config.json 被读入（baseUrl 来自文件而非默认值）', state.payload?.value?.config?.baseUrl === DEFAULT_BASE, state.payload?.value?.config?.baseUrl)
 
+  // ── 配置损坏：不静默回退 ───────────────────────────────────────────────────
+  // 改前 readConfig 把「文件坏了」和「文件不存在」都吞成默认值，用户只会发现
+  // 开关全变回去了。现在仍要能用（返回默认值），但必须留下告警。
+  const CONFIG_FILE = TEST_HOME + '/storages/siyuan/config.json'
+  fs.writeFileSync(CONFIG_FILE, '{ 这不是 JSON', 'utf8')
+  const warnedBefore = warnings.length
+  const corrupted = await call('getState', {})
+  check('损坏的配置不会让 getState 失败（回退默认值）', corrupted.payload?.ok === true && corrupted.payload?.value?.config?.baseUrl === 'http://127.0.0.1:6806', JSON.stringify(corrupted.payload?.value?.config))
+  check('损坏的配置会留下告警', warnings.length > warnedBefore && warnings.some((line) => line.includes('配置文件损坏') && line.includes(CONFIG_FILE)), JSON.stringify(warnings.slice(warnedBefore)))
+  await call('getState', {})
+  check('同一份坏文件只告警一次', warnings.filter((line) => line.includes('配置文件损坏')).length === 1, JSON.stringify(warnings.filter((line) => line.includes('配置文件损坏'))))
+  fs.rmSync(CONFIG_FILE, { force: true })
+
   const before = tools.length
   const updated = await call('updateConfig', { baseUrl: DEFAULT_BASE + '/', defaultNotebook: '20260723165907-3zj91ge', tools: { write: true, danger: true } })
   check('updateConfig ok', updated.status === 200 && updated.payload?.ok === true, JSON.stringify(updated.payload).slice(0, 200))
@@ -208,6 +223,11 @@ console.log('— 路由：getState / updateConfig —')
   check('工具随开关重新注册（8 → 17）', tools.length === 17 && before === 8, `before=${before} after=${tools.length}`)
   check('旧注册被释放', disposeCount === 8, `disposeCount=${disposeCount}`)
   check('config.json 落盘', fs.existsSync(TEST_HOME + '/storages/siyuan/config.json') === true)
+  // H2：原子写不能留下临时文件，且读回来的内容要和刚写的配置一致。
+  const leftovers = fs.readdirSync(TEST_HOME + '/storages/siyuan').filter((name) => name.includes('.tmp-'))
+  check('原子写不残留临时文件', leftovers.length === 0, JSON.stringify(leftovers))
+  const onDisk = JSON.parse(fs.readFileSync(TEST_HOME + '/storages/siyuan/config.json', 'utf8'))
+  check('落盘内容与 getState 返回的配置一致', onDisk.baseUrl === updated.payload?.value?.config?.baseUrl && onDisk.defaultNotebook === '20260723165907-3zj91ge' && onDisk.tools?.read === true && onDisk.tools?.danger === true, JSON.stringify(onDisk))
 
   const reopened = await call('getState', {})
   check('重新读取仍是 17 个工具', reopened.payload?.value?.toolNames?.length === 17, String(reopened.payload?.value?.toolNames?.length))
