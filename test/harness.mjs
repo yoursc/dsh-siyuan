@@ -319,10 +319,54 @@ console.log('— 路由：配置损坏不静默 —')
   fs.rmSync(CONFIG_FILE, { force: true })
 }
 
+console.log('— 配置文件里的 baseUrl 非法时不静默 —')
+{
+  // C3：手改坏/旧版写入的坏地址不能静默用下去。用独立插件实例：
+  // 告警去重标记是模块级的，复用前一个实例会让断言被去重吞掉。
+  // 直接调 internals.readConfig() 而不是走路由 getState，避免触碰真实实例的探测。
+  const warnSink = []
+  const badUrlInject = {
+    get: () => undefined,
+    effect: (callback) => {
+      callback()
+      return () => {}
+    },
+    logger: { info: () => {}, warn: (message) => warnSink.push(String(message)) },
+    tools: { register: () => () => {} },
+    webServer: { register: () => () => {} },
+  }
+  const badUrlPlugin = await loadPlugin()
+  badUrlPlugin.apply({
+    ...badUrlInject,
+    inject: (_deps, callback) => callback(badUrlInject),
+    get tools() {
+      throw new Error('cannot get property "tools" without inject')
+    },
+    get webServer() {
+      throw new Error('cannot get property "webServer" without inject')
+    },
+  })
+  const CONFIG_FILE = TEST_HOME + '/storages/siyuan/config.json'
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify({ baseUrl: 'not a url', defaultNotebook: 'nb-x' }), 'utf8')
+  const config = badUrlPlugin.internals.readConfig()
+  check('坏 baseUrl 回退默认值而不是静默使用', config.baseUrl === 'http://127.0.0.1:6806' && config.defaultNotebook === 'nb-x', JSON.stringify(config))
+  check('坏 baseUrl 留下告警', warnSink.some((line) => line.includes('baseUrl 不是合法') && line.includes(CONFIG_FILE)), JSON.stringify(warnSink))
+  // 恢复成最初写入的合法内容，别影响后续段落（它们仍会经 readConfig 读这份文件）。
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify({ baseUrl: DEFAULT_BASE, defaultNotebook: '', tools: { read: true, daily: true } }), 'utf8')
+}
+
 console.log('— 路由：getState / updateConfig —')
 {
   const state = await call('getState', {})
   const before = tools.length
+  // C3 回归：保存入口必须拒绝非法 baseUrl，否则设置页回"已保存"的假成功，
+  // 之后所有请求都失败，用户只能从"连接思源失败"反推。
+  const badUrl = await call('updateConfig', { baseUrl: 'not a url' })
+  check('updateConfig 拒绝非 http(s) 的 baseUrl', badUrl.payload?.ok === false && /http/.test(badUrl.payload?.error?.message ?? ''), JSON.stringify(badUrl.payload))
+  const badScheme = await call('updateConfig', { baseUrl: 'javascript:alert(1)' })
+  check('updateConfig 拒绝 javascript: 协议', badScheme.payload?.ok === false, JSON.stringify(badScheme.payload))
+  const afterReject = await call('getState', {})
+  check('拒绝后 baseUrl 仍是替身地址（配置没被写坏）', afterReject.payload?.value?.config?.baseUrl === DEFAULT_BASE, afterReject.payload?.value?.config?.baseUrl)
   const updated = await call('updateConfig', { baseUrl: DEFAULT_BASE + '/', defaultNotebook: '20260723165907-3zj91ge', tools: { write: true, danger: true } })
   check('updateConfig ok', updated.status === 200 && updated.payload?.ok === true, JSON.stringify(updated.payload).slice(0, 200))
   check('baseUrl 去掉了尾部斜杠', updated.payload?.value?.config?.baseUrl === DEFAULT_BASE, updated.payload?.value?.config?.baseUrl)

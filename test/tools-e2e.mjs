@@ -581,6 +581,12 @@ console.log('— 日记路径渲染 —')
   check('goLayout 渲染 2006-01-02 不会产出 2126', goLayout(date, '2006-01-02') === '2026-09-12', goLayout(date, '2006-01-02'))
   check('goLayout 渲染时间片段', goLayout(new Date(2026, 8, 12, 7, 5, 3), '15:04:05') === '07:05:03', goLayout(new Date(2026, 8, 12, 7, 5, 3), '15:04:05'))
   check('goLayout 渲染 Jan / Mon', goLayout(date, 'Jan Mon') === 'Sep Sat', goLayout(date, 'Jan Mon'))
+  // C2 回归：长 token 必须先于能被它截短命中的短 token。2026-09-12 是周六，
+  // 改前 'Monday' 里的 'Mon' 命中前缀，渲染成 "Satday"，日记会按损坏路径"成功"创建。
+  check('goLayout 渲染 Monday 不产 "Satday"', goLayout(date, '2006-01-02 Monday') === '2026-09-12 Saturday', goLayout(date, '2006-01-02 Monday'))
+  check('goLayout 渲染 January 不产 "Sepuary"', goLayout(date, 'January 2006') === 'September 2026', goLayout(date, 'January 2006'))
+  check('goLayout 短 token 行为不变', goLayout(date, 'Jan') === 'Sep' && goLayout(date, 'Mon') === 'Sat', goLayout(date, 'Jan Mon'))
+  check('renderDailyPath 展开 Monday 模板', renderDailyPath('/日记/{{now | date "2006-01-02 Monday"}}', date) === '/日记/2026-09-12 Saturday', renderDailyPath('/日记/{{now | date "2006-01-02 Monday"}}', date))
   check('renderDailyPath 展开 {{now | date}}', renderDailyPath('/daily note/{{now | date "2006/01/02"}}', date) === '/daily note/2026/09/12', renderDailyPath('/daily note/{{now | date "2006/01/02"}}', date))
   check('renderDailyPath 支持多个占位符', renderDailyPath('/{{now | date "2006"}}/{{now | date "01"}}', date) === '/2026/09', renderDailyPath('/{{now | date "2006"}}/{{now | date "01"}}', date))
   check('renderDailyPath 原样保留无占位符模板', renderDailyPath('/固定路径', date) === '/固定路径')
