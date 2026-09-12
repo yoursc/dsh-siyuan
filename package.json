@@ -47,7 +47,7 @@
     }
   },
   "scripts": {
-    "test": "node test/harness.mjs && node test/tools-e2e.mjs && node test/client-harness.mjs && node test/client-render.mjs"
+    "test": "node test/harness.mjs && node test/tools-e2e.mjs && node test/client-harness.mjs && node test/client-render.mjs && node test/client-interactive.mjs"
   },
   "keywords": [
     "dsh",

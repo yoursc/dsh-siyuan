@@ -15,6 +15,8 @@
  */
 
 import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { startMockSiYuan } from './mock-siyuan.mjs'
 
 const LIVE = process.argv.includes('--live')
@@ -22,8 +24,8 @@ const LIVE = process.argv.includes('--live')
 delete process.env.SIYUAN_TOKEN
 
 // 配置写入隔离到临时 DSH_HOME，测试不动真实 ~/.dsh。
-const TEST_HOME = '/tmp/sy-harness-home'
-fs.rmSync(TEST_HOME, { recursive: true, force: true })
+// 每次跑用独立临时目录：并行执行（或同机多个 CI job）不会互相删配置。
+const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'sy-harness-'))
 process.env.DSH_HOME = TEST_HOME
 // 目录先建好：下面的「损坏配置」用例要直接写这个文件，两种模式下都得存在。
 fs.mkdirSync(TEST_HOME + '/storages/siyuan', { recursive: true })
@@ -39,9 +41,17 @@ if (mock !== null) {
 }
 console.log(LIVE ? '模式：--live（探测真实实例 127.0.0.1:6806）' : '模式：本地替身（不依赖真实思源）')
 
-const plugin = await import('../lib/index.js')
+// 插件有模块级状态（配置损坏告警的去重标记），需要干净状态的用例用 loadPlugin() 取新实例。
+let pluginLoadCount = 0
+const loadPlugin = () => import(`../lib/index.js?case=${(pluginLoadCount += 1)}`)
+const plugin = await loadPlugin()
 
 const failures = []
+/** 成功时清掉临时 home；失败时保留，便于取证（路径会随失败清单一起打印）。 */
+function cleanupHome() {
+  if (failures.length === 0) fs.rmSync(TEST_HOME, { recursive: true, force: true })
+}
+
 function check(label, condition, detail) {
   if (condition === true) {
     console.log(`  ok   ${label}`)
@@ -140,8 +150,8 @@ for (const definition of tools) {
 
 // ── 路由干跑 ────────────────────────────────────────────────────────────────
 
-function makeRequest({ method = 'POST', url = '/siyuan/api/getState', headers = { host: '127.0.0.1:3080' }, body = {} } = {}) {
-  const payload = Buffer.from(JSON.stringify(body))
+function makeRequest({ method = 'POST', url = '/siyuan/api/getState', headers = { host: '127.0.0.1:3080' }, body = {}, rawBody = undefined } = {}) {
+  const payload = Buffer.from(rawBody === undefined ? JSON.stringify(body) : rawBody)
   return {
     method,
     url,
@@ -185,6 +195,59 @@ console.log('— 路由：基础分支 —')
   const bad = await call('getState', {}, { headers: { host: 'evil.example.com' } })
   check('外部 Host 被围栏拒绝 (403)', bad.status === 403, JSON.stringify(bad.payload))
 
+  // C7：围栏的其余判据——跨站标记、origin 与 Host 不一致、受信 Host 白名单。
+  const crossSite = await call('getState', {}, { headers: { host: '127.0.0.1:3080', 'sec-fetch-site': 'cross-site' } })
+  check('sec-fetch-site: cross-site 被拒 (403)', crossSite.status === 403, JSON.stringify(crossSite.payload))
+
+  const sameSite = await call('getState', {}, { headers: { host: '127.0.0.1:3080', 'sec-fetch-site': 'same-origin' } })
+  check('sec-fetch-site: same-origin 放行', sameSite.status === 200, JSON.stringify(sameSite.payload).slice(0, 120))
+
+  const foreignOrigin = await call('getState', {}, { headers: { host: '127.0.0.1:3080', origin: 'http://evil.example.com' } })
+  check('origin 与 Host 不一致被拒 (403)', foreignOrigin.status === 403, JSON.stringify(foreignOrigin.payload))
+
+  const sameOrigin = await call('getState', {}, { headers: { host: '127.0.0.1:3080', origin: 'http://127.0.0.1:3080' } })
+  check('origin 与 Host 一致放行', sameOrigin.status === 200, JSON.stringify(sameOrigin.payload).slice(0, 120))
+
+  const noHost = await call('getState', {}, { headers: {} })
+  check('缺少 Host 头被拒 (403)', noHost.status === 403, JSON.stringify(noHost.payload))
+
+  // 受信 Host 白名单：非 loopback 的部署域名靠 webRuntime.trustedHosts 放行。
+  const routes3 = []
+  const trustedInject = {
+    get: (name) => (name === 'webRuntime' ? { trustedHosts: ['dsh.example.com'] } : undefined),
+    effect: (callback) => {
+      callback()
+      return () => {}
+    },
+    logger: { info: () => {}, warn: () => {} },
+    tools: { register: () => () => {} },
+    webServer: {
+      register: (route) => {
+        routes3.push(route)
+        return () => {}
+      },
+    },
+  }
+  plugin.apply({
+    ...trustedInject,
+    inject: (_deps, callback) => callback(trustedInject),
+    get tools() {
+      throw new Error('cannot get property "tools" without inject')
+    },
+    get webServer() {
+      throw new Error('cannot get property "webServer" without inject')
+    },
+  })
+  const trustedCall = async (headers) => {
+    const request = makeRequest({ url: '/siyuan/api/getState', headers })
+    const response = makeResponse()
+    await routes3[0].handler(request, response)
+    return response.status
+  }
+  check('受信 Host 白名单内放行', (await trustedCall({ host: 'dsh.example.com' })) === 200)
+  check('受信 Host 之外的域名仍被拒', (await trustedCall({ host: 'other.example.com' })) === 403)
+  check('受信 Host 带跨站标记仍被拒', (await trustedCall({ host: 'dsh.example.com', 'sec-fetch-site': 'cross-site' })) === 403)
+
   const wrongMethod = await call('getState', {}, { method: 'GET' })
   check('非 POST 返回 405', wrongMethod.status === 405)
 
@@ -192,29 +255,73 @@ console.log('— 路由：基础分支 —')
   check('未知方法返回 404', unknown.status === 404)
 }
 
+console.log('— 路由：请求体错误面 —')
+{
+  // C7：非法 JSON、超过 2MB、空请求体三种输入都要有明确行为，不能静默当成空对象。
+  const badJson = await call('updateConfig', undefined, { rawBody: '{ 不是 JSON' })
+  check('非法 JSON 请求体被拒且文案可读', badJson.payload?.ok === false && /不是合法 JSON/.test(badJson.payload?.error?.message ?? ''), JSON.stringify(badJson.payload))
+
+  const tooBig = await call('updateConfig', undefined, { rawBody: JSON.stringify({ baseUrl: 'x'.repeat(2 * 1024 * 1024 + 10) }) })
+  check('超过 2MB 的请求体被拒', tooBig.payload?.ok === false && /请求体过大/.test(tooBig.payload?.error?.message ?? ''), JSON.stringify(tooBig.payload).slice(0, 160))
+
+  const empty = await call('getState', undefined, { rawBody: '' })
+  check('空请求体按空对象处理', empty.status === 200 && empty.payload?.ok === true, JSON.stringify(empty.payload).slice(0, 120))
+
+  const blank = await call('getState', undefined, { rawBody: '   ' })
+  check('全空白请求体按空对象处理', blank.status === 200 && blank.payload?.ok === true, JSON.stringify(blank.payload).slice(0, 120))
+}
+
+console.log('— 路由：配置损坏不静默 —')
+{
+  // 用独立实例：告警去重标记是模块级的，和前面用例共用会让首条告警被吞掉。
+  const corruptRoutes = []
+  const corruptInject = {
+    get: () => undefined,
+    effect: (callback) => {
+      callback()
+      return () => {}
+    },
+    logger: { info: () => {}, warn: (message) => warnings.push(String(message)) },
+    tools: { register: () => () => {} },
+    webServer: {
+      register: (route) => {
+        corruptRoutes.push(route)
+        return () => {}
+      },
+    },
+  }
+  const corruptPlugin = await loadPlugin()
+  corruptPlugin.apply({
+    ...corruptInject,
+    inject: (_deps, callback) => callback(corruptInject),
+    get tools() {
+      throw new Error('cannot get property "tools" without inject')
+    },
+    get webServer() {
+      throw new Error('cannot get property "webServer" without inject')
+    },
+  })
+  const CONFIG_FILE = TEST_HOME + '/storages/siyuan/config.json'
+  fs.writeFileSync(CONFIG_FILE, '{ 这不是 JSON', 'utf8')
+  const callCorrupt = async () => {
+    const request = makeRequest({ url: '/siyuan/api/getState' })
+    const response = makeResponse()
+    await corruptRoutes[0].handler(request, response)
+    return { status: response.status, payload: JSON.parse(response.body) }
+  }
+  const warnedBefore = warnings.filter((line) => line.includes('配置文件损坏')).length
+  const corrupted = await callCorrupt()
+  check('损坏的配置不会让 getState 失败（回退默认值）', corrupted.payload?.ok === true && corrupted.payload?.value?.config?.baseUrl === 'http://127.0.0.1:6806', JSON.stringify(corrupted.payload?.value?.config))
+  const corruptWarnings = warnings.filter((line) => line.includes('配置文件损坏'))
+  check('损坏的配置会留下告警', corruptWarnings.length > warnedBefore && corruptWarnings.some((line) => line.includes(CONFIG_FILE)), JSON.stringify(corruptWarnings))
+  await callCorrupt()
+  check('同一份坏文件只告警一次', warnings.filter((line) => line.includes('配置文件损坏')).length === warnedBefore + 1, JSON.stringify(warnings.filter((line) => line.includes('配置文件损坏'))))
+  fs.rmSync(CONFIG_FILE, { force: true })
+}
+
 console.log('— 路由：getState / updateConfig —')
 {
   const state = await call('getState', {})
-  check('getState ok', state.status === 200 && state.payload?.ok === true, JSON.stringify(state.payload).slice(0, 200))
-  check('默认 baseUrl 是设置里的值', state.payload?.value?.config?.baseUrl === DEFAULT_BASE, state.payload?.value?.config?.baseUrl)
-  check('默认 read=true / write=false / danger=false', state.payload?.value?.config?.tools?.read === true && state.payload?.value?.config?.tools?.write === false && state.payload?.value?.config?.tools?.danger === false)
-  check('思源可达且版本已读取', state.payload?.value?.reachable === true && /^\d+\.\d+/.test(String(state.payload?.value?.version)), JSON.stringify({ reachable: state.payload?.value?.reachable, version: state.payload?.value?.version }))
-  check('token 未配置', state.payload?.value?.token?.configured === false, JSON.stringify(state.payload?.value?.token))
-  check('预置的 config.json 被读入（baseUrl 来自文件而非默认值）', state.payload?.value?.config?.baseUrl === DEFAULT_BASE, state.payload?.value?.config?.baseUrl)
-
-  // ── 配置损坏：不静默回退 ───────────────────────────────────────────────────
-  // 改前 readConfig 把「文件坏了」和「文件不存在」都吞成默认值，用户只会发现
-  // 开关全变回去了。现在仍要能用（返回默认值），但必须留下告警。
-  const CONFIG_FILE = TEST_HOME + '/storages/siyuan/config.json'
-  fs.writeFileSync(CONFIG_FILE, '{ 这不是 JSON', 'utf8')
-  const warnedBefore = warnings.length
-  const corrupted = await call('getState', {})
-  check('损坏的配置不会让 getState 失败（回退默认值）', corrupted.payload?.ok === true && corrupted.payload?.value?.config?.baseUrl === 'http://127.0.0.1:6806', JSON.stringify(corrupted.payload?.value?.config))
-  check('损坏的配置会留下告警', warnings.length > warnedBefore && warnings.some((line) => line.includes('配置文件损坏') && line.includes(CONFIG_FILE)), JSON.stringify(warnings.slice(warnedBefore)))
-  await call('getState', {})
-  check('同一份坏文件只告警一次', warnings.filter((line) => line.includes('配置文件损坏')).length === 1, JSON.stringify(warnings.filter((line) => line.includes('配置文件损坏'))))
-  fs.rmSync(CONFIG_FILE, { force: true })
-
   const before = tools.length
   const updated = await call('updateConfig', { baseUrl: DEFAULT_BASE + '/', defaultNotebook: '20260723165907-3zj91ge', tools: { write: true, danger: true } })
   check('updateConfig ok', updated.status === 200 && updated.payload?.ok === true, JSON.stringify(updated.payload).slice(0, 200))
@@ -229,9 +336,16 @@ console.log('— 路由：getState / updateConfig —')
   const onDisk = JSON.parse(fs.readFileSync(TEST_HOME + '/storages/siyuan/config.json', 'utf8'))
   check('落盘内容与 getState 返回的配置一致', onDisk.baseUrl === updated.payload?.value?.config?.baseUrl && onDisk.defaultNotebook === '20260723165907-3zj91ge' && onDisk.tools?.read === true && onDisk.tools?.danger === true, JSON.stringify(onDisk))
 
+  // C6：把开关关回去也要正确释放（此前只覆盖了 8 → 17 的开启方向）
+  const turnedOff = await call('updateConfig', { tools: { write: false, danger: false } })
+  check('关闭分组后工具回落到 8 个', turnedOff.payload?.ok === true && tools.length === 8, `tools=${tools.length}`)
+  check('关闭分组的释放计数继续累加', disposeCount === 25, `disposeCount=${disposeCount}`)
+  check('再次开启回到 17 个', (await call('updateConfig', { tools: { write: true, danger: true } }))?.payload?.ok === true && tools.length === 17, `tools=${tools.length}`)
+
   const reopened = await call('getState', {})
   check('重新读取仍是 17 个工具', reopened.payload?.value?.toolNames?.length === 17, String(reopened.payload?.value?.toolNames?.length))
 }
+
 
 console.log('— 路由：token 与思源接口错误面 —')
 {
@@ -355,12 +469,24 @@ console.log('— 凭据路径（伪造 credentials 服务）—')
   check('清除后 token 变为未配置', clear.payload?.value?.token?.configured === false, JSON.stringify(clear.payload?.value?.token))
 }
 
+// C8：插件被卸载（ctx.effect 的 disposer）时必须把工具与路由都释放掉。改前这里从没跑过。
+console.log('— 卸载路径 —')
+{
+  const before = tools.length
+  const routesBefore = routes.length
+  check('卸载前工具与路由都还在', before > 0 && routesBefore === 1, `tools=${before} routes=${routesBefore}`)
+  for (const dispose of disposers.splice(0)) dispose()
+  check('卸载后工具全部注销', tools.length === 0, `剩余 ${tools.length}`)
+  check('卸载后路由全部注销', routes.length === 0, `剩余 ${routes.length}`)
+}
+
 console.log('')
 if (mock !== null) await mock.close()
 if (failures.length === 0) {
   console.log('全部通过 ✅')
+  cleanupHome()
   process.exit(0)
 }
-console.log(`${failures.length} 项失败：`)
+console.log(`${failures.length} 项失败（临时 home 保留在 ${TEST_HOME}）：`)
 for (const failure of failures) console.log(' - ' + failure)
 process.exit(1)

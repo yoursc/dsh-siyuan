@@ -15,6 +15,9 @@
 import http from 'node:http'
 
 export async function startMockSiYuan({ token = 'test-token', deleteDelayMs = 0, responseDelayMs = 0 } = {}) {
+  /** 替身支持的 SQL 表（C3：用于拒绝写错表名的查询）。 */
+  const MOCK_TABLES = new Set(['blocks'])
+
   const state = {
     notebooks: [
       {
@@ -30,6 +33,17 @@ export async function startMockSiYuan({ token = 'test-token', deleteDelayMs = 0,
     attrs: new Map(),
     requests: [],
     sequence: 0,
+  }
+
+  /** 未落库的定时器：close 时统一清掉，避免测试结束时还有挂起回调。 */
+  const pendingTimers = new Set()
+  const later = (fn, ms) => {
+    const timer = setTimeout(() => {
+      pendingTimers.delete(timer)
+      fn()
+    }, ms)
+    pendingTimers.add(timer)
+    return timer
   }
 
   const nextId = (prefix) => {
@@ -105,6 +119,11 @@ export async function startMockSiYuan({ token = 'test-token', deleteDelayMs = 0,
       [...state.docs.values()].filter((doc) => doc.notebook === payload.notebook && doc.hpath === payload.path).map((doc) => doc.id),
     '/api/filetree/createDocWithMd': (payload) => {
       if (typeof payload.path !== 'string' || !payload.path.startsWith('/')) throw new MockError('path must start with /')
+      // C4：真实思源对不存在的 notebook 会返回非 0，替身原来照单全收，
+      // 于是"往不存在的笔记本写文档"这类 bug 在替身下永远测不出来。
+      if (!state.notebooks.some((item) => item.id === payload.notebook)) {
+        throw new MockError(`notebook not found: ${String(payload.notebook)}`)
+      }
       const doc = createDoc(payload.notebook, payload.path, payload.markdown ?? '')
       return doc.id
     },
@@ -164,7 +183,7 @@ export async function startMockSiYuan({ token = 'test-token', deleteDelayMs = 0,
         for (const [id, block] of [...state.blocks.entries()]) if (block.docId === doc.id) state.blocks.delete(id)
       }
       // 实测：思源的删除是异步落库的，返回成功时 blocks 行还在。
-      if (deleteDelayMs > 0) setTimeout(apply, deleteDelayMs)
+      if (deleteDelayMs > 0) later(apply, deleteDelayMs)
       else apply()
       return null
     },
@@ -179,8 +198,11 @@ export async function startMockSiYuan({ token = 'test-token', deleteDelayMs = 0,
     },
     '/api/block/insertBlock': (payload) => {
       const anchor = state.blocks.get(payload.previousID)
-      const parent = docOf(payload.parentID)
-      const docId = anchor?.docId ?? parent?.id
+      const parentDoc = docOf(payload.parentID)
+      // parentID 也可以是块 id（插件文档里就建议往标题下插入时用 previousID=标题；
+      // 但真实思源同样接受块父级），这里两种都认。
+      const parentBlock = state.blocks.get(payload.parentID)
+      const docId = anchor?.docId ?? parentDoc?.id ?? parentBlock?.docId
       const doc = docOf(docId)
       if (doc === undefined) throw new MockError('insertBlock needs an existing previousID or parentID')
       const created = []
@@ -202,7 +224,7 @@ export async function startMockSiYuan({ token = 'test-token', deleteDelayMs = 0,
       if (state.docs.has(payload.id)) return [{ doOperations: [{ action: 'delete', id: payload.id }] }]
       if (!state.blocks.has(payload.id)) throw new MockError(`block not found: ${String(payload.id)}`)
       const apply = () => state.blocks.delete(payload.id)
-      if (deleteDelayMs > 0) setTimeout(apply, deleteDelayMs)
+      if (deleteDelayMs > 0) later(apply, deleteDelayMs)
       else apply()
       return [{ doOperations: [{ action: 'delete', id: payload.id }] }]
     },
@@ -219,8 +241,14 @@ export async function startMockSiYuan({ token = 'test-token', deleteDelayMs = 0,
     },
 
     '/api/query/sql': (payload) => {
-      const stmt = String(payload.stmt ?? '')
-      if (!/^select\b/i.test(stmt.trim())) throw new MockError('only SELECT is allowed')
+      const stmt = String(payload.stmt ?? '').trim()
+      if (!/^select\b/i.test(stmt)) throw new MockError('only SELECT is allowed')
+      // C3：替身不是 SQL 引擎，但至少要校验表名——插件把 blocks 写成 blockz 时，原来会
+      // 因为"语句长得像"而静默返回 []，把查询错误伪装成"没有结果"。
+      const fromTable = /\bfrom\s+([a-z_][a-z0-9_]*)/i.exec(stmt)
+      if (fromTable !== null && !MOCK_TABLES.has(fromTable[1].toLowerCase())) {
+        throw new MockError(`no such table: ${fromTable[1]}（替身只认 ${[...MOCK_TABLES].join(', ')}）`)
+      }
       if (/select\s+1\s+as\s+ok/i.test(stmt)) return [{ ok: 1 }]
       // 单 id 查类型（插件用它区分文档块 / 内容块，并在删除后复核）
       const singleId = /where\s+id\s*=\s*'([^']+)'/i.exec(stmt)
@@ -240,7 +268,8 @@ export async function startMockSiYuan({ token = 'test-token', deleteDelayMs = 0,
       if (rootClause !== null) {
         return blocksOfDoc(rootClause[1]).map((block) => ({ id: block.id, type: block.type, parent_id: block.docId, markdown: block.markdown }))
       }
-      return []
+      // 替身不认识的 SELECT 形状：显式报错，而不是返回空数组把"语句形状变了"伪装成"没有结果"。
+      throw new MockError(`mock 不认识的 SELECT 形状：${stmt}`)
     },
 
     '/api/search/fullTextSearchBlock': (payload) => {
@@ -352,6 +381,8 @@ export async function startMockSiYuan({ token = 'test-token', deleteDelayMs = 0,
       notebook.closed = closed === true
     },
     close() {
+      for (const timer of pendingTimers) clearTimeout(timer)
+      pendingTimers.clear()
       return new Promise((resolve) => server.close(resolve))
     },
   }

@@ -9,6 +9,8 @@
  * 用法：node test/client-render.mjs
  */
 
+import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 
 const failures = []
@@ -56,24 +58,61 @@ exportsObject.apply({
 
 // ── 宿主 getState 的真实形状 ───────────────────────────────────────────────
 
-const hostState = {
-  config: {
+// C2：形状来源是宿主真实产出，不是手抄。改 lib/index.js 的 statePayload 字段名，
+// 这里会立刻跟着变（构建 payload 的失败会让本文件直接红），客户端不同步时不再"两边一起错"。
+const HOST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'sy-client-render-'))
+fs.mkdirSync(`${HOST_HOME}/storages/siyuan`, { recursive: true })
+process.env.DSH_HOME = HOST_HOME
+fs.writeFileSync(
+  `${HOST_HOME}/storages/siyuan/config.json`,
+  JSON.stringify({
     baseUrl: 'http://127.0.0.1:6806',
     defaultNotebook: '20260723165907-3zj91ge',
-    tools: { read: true, write: true, daily: true, danger: false },
+    // 四组全开：宿主的 statePayload.toolNames 是**全部 17 个定义**，
+    // 与开关无关；夹具要覆盖到 danger 组，就得让它也注册。
+    tools: { read: true, write: true, daily: true, danger: true },
+  }),
+)
+const hostModule = await import('../lib/index.js')
+const hostTools = []
+const hostInject = {
+  get: () => undefined,
+  effect: (callback) => {
+    callback()
+    return () => {}
   },
-  token: { configured: true, source: 'credentials', writable: true },
+  logger: { info: () => {}, warn: () => {} },
+  tools: {
+    register: (definition) => {
+      hostTools.push({ group: definition.group, definition })
+      return () => {}
+    },
+  },
+  webServer: { register: () => () => {} },
+}
+hostModule.apply({
+  ...hostInject,
+  inject: (_deps, callback) => callback(hostInject),
+  get tools() {
+    throw new Error('cannot get property "tools" without inject')
+  },
+  get webServer() {
+    throw new Error('cannot get property "webServer" without inject')
+  },
+})
+const hostPayload = await hostModule.internals.buildStatePayload(
+  { get: () => undefined, logger: { info: () => {}, warn: () => {} } },
+  hostTools,
+)
+
+const hostState = {
+  ...hostPayload,
+  config: { ...hostPayload.config, tools: { read: true, write: true, daily: true, danger: false } },
+  // 下面三个是渲染断言需要的展示值：本机没有替身可探测，所以宿主产出会是
+  // reachable:false / version:''；这里按"已连上思源"的场景覆盖，其余字段全部来自宿主。
   reachable: true,
   version: '3.8.3',
-  toolGroups: ['read', 'write', 'daily', 'danger'],
-  // 与宿主 statePayload 同形状：每组的数量必须和 lib/index.js 的实际分组一致
-  // （read 7 / write 7 / daily 1 / danger 2 = 17），否则「已启用 N」会算错。
-  toolNames: [
-    ...Array.from({ length: 7 }, (_, i) => ({ name: `siyuan_read_${i}`, group: 'read' })),
-    ...Array.from({ length: 7 }, (_, i) => ({ name: `siyuan_write_${i}`, group: 'write' })),
-    ...Array.from({ length: 1 }, (_, i) => ({ name: `siyuan_daily_${i}`, group: 'daily' })),
-    ...Array.from({ length: 2 }, (_, i) => ({ name: `siyuan_danger_${i}`, group: 'danger' })),
-  ],
+  token: { configured: true, source: 'credentials', writable: true },
 }
 const draftState = {
   baseUrl: hostState.config.baseUrl,

@@ -6,17 +6,25 @@
  */
 
 import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { startMockSiYuan } from './mock-siyuan.mjs'
 
-const TEST_HOME = '/tmp/sy-tools-home'
-fs.rmSync(TEST_HOME, { recursive: true, force: true })
+// 每次跑用独立临时目录：并行执行（或同机多个 CI job）不会互相删配置。
+const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'sy-tools-'))
 process.env.DSH_HOME = TEST_HOME
 
 const failures = []
+/** 成功时清掉临时 home；失败时保留，便于取证（路径会随失败清单一起打印）。 */
+function cleanupHome() {
+  if (failures.length === 0) fs.rmSync(TEST_HOME, { recursive: true, force: true })
+}
+
 function check(label, condition, detail) {
   if (condition === true) console.log(`  ok   ${label}`)
   else {
-    failures.push(label)
+    // detail 要留在失败清单里，否则末尾的汇总只有标签、没有定位信息。
+    failures.push(label + (detail === undefined ? '' : ` — ${detail}`))
     console.log(`  FAIL ${label}${detail === undefined ? '' : ' — ' + detail}`)
   }
 }
@@ -153,6 +161,17 @@ const duplicate = await callTool('siyuan_create_doc', { path: '/收件箱/新文
 check('allowDuplicate=true 时才重复创建', duplicate.ok && /已创建文档/.test(duplicate.text), duplicate.text)
 const samePathCount = [...mock.state.docs.values()].filter((doc) => doc.hpath === '/收件箱/新文档').length
 check('同路径确实存在两份（模拟 createDocWithMd 非幂等）', samePathCount === 2, String(samePathCount))
+
+// C4 回归：替身自己（也就是"真实思源"这一侧）必须拒绝不存在的笔记本。
+// 走原始 HTTP，绕开插件的 B5 预检，单独验证替身的行为与真实思源一致。
+{
+  const raw = await fetch(`${mock.baseUrl}/api/filetree/createDocWithMd`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Token ${mock.token}` },
+    body: JSON.stringify({ notebook: 'nb-nope', path: '/收件箱/糟糕', markdown: 'x' }),
+  }).then((response) => response.json())
+  check('替身对不存在的笔记本返回非 0 code', raw.code !== 0 && /notebook not found/.test(String(raw.msg)), JSON.stringify(raw))
+}
 
 // B5 回归：笔记本必须存在且已打开。改前 assertNotebook 只看"有没有填"，
 // 往不存在的笔记本写会漏到思源那里，报错文案不可读（替身里甚至不会报错）。
@@ -500,6 +519,73 @@ console.log('— 取消（abort）—')
   await abortMock.close()
 }
 
+// ── 工具分支缺口（C6）──────────────────────────────────────────────────────
+
+console.log('— 工具分支缺口 —')
+{
+  // 未配置默认笔记本且未显式传 notebook：三个工具都要给出可读错误，而不是发请求。
+  const savedConfig = JSON.parse(fs.readFileSync(`${TEST_HOME}/storages/siyuan/config.json`, 'utf8'))
+  fs.writeFileSync(`${TEST_HOME}/storages/siyuan/config.json`, JSON.stringify({ ...savedConfig, defaultNotebook: '' }))
+  const noNotebook = await callTool('siyuan_list_docs', { path: '/' })
+  check('list_docs 缺 notebook 时报可读错误', noNotebook.ok === false && /未指定笔记本/.test(noNotebook.text), noNotebook.text)
+  const noNotebookDaily = await callTool('siyuan_daily_note', { action: 'read' })
+  check('daily_note 缺 notebook 时报可读错误', noNotebookDaily.ok === false && /未指定笔记本/.test(noNotebookDaily.text), noNotebookDaily.text)
+  const noNotebookCreate = await callTool('siyuan_create_doc', { path: '/x', markdown: 'x' })
+  check('create_doc 缺 notebook 时报可读错误', noNotebookCreate.ok === false && /未指定笔记本/.test(noNotebookCreate.text), noNotebookCreate.text)
+  fs.writeFileSync(`${TEST_HOME}/storages/siyuan/config.json`, JSON.stringify(savedConfig))
+
+  // insert_block 的 parentId 分支（此前只覆盖了 previousId）
+  const parentDoc = mock.seedDoc({ hpath: '/收件箱/父块用例' })
+  const parentBlockId = [...mock.state.blocks.values()].find((block) => block.docId === parentDoc).id
+  const insertedByParent = await callTool('siyuan_insert_block', { parentId: parentBlockId, markdown: '挂在父块下。' })
+  check('insert_block 支持 parentId 分支', insertedByParent.ok && /已插入块/.test(insertedByParent.text), insertedByParent.text)
+  const parentRequests = mock.requestsTo('/api/block/insertBlock').filter((entry) => entry.payload.parentID === parentBlockId)
+  check('parentId 走的是 parentID 字段', parentRequests.length > 0 && parentRequests.every((entry) => entry.payload.previousID === undefined), JSON.stringify(parentRequests[0]?.payload))
+
+  // set_block_attrs 的 attrs 非对象拒绝
+  const badAttrs = await callTool('siyuan_set_block_attrs', { id: docId, attrs: ['not-an-object'] })
+  check('set_block_attrs 拒绝非对象 attrs', badAttrs.ok === false && /attrs 必须是对象/.test(badAttrs.text), badAttrs.text)
+
+  // move_doc 的 toId 空串（此前只覆盖了 docIds 为空）
+  const emptyToId = await callTool('siyuan_move_doc', { docIds: [parentDoc], toId: '   ' })
+  check('move_doc 拒绝空 toId', emptyToId.ok === false && /必须提供 toId/.test(emptyToId.text), emptyToId.text)
+
+  // read_doc 的 format 非法回落 text
+  // 目标块的标题段在前面被改写/删除了，这里断言正文，避免依赖测试执行顺序。
+  const fallbackFormat = await callTool('siyuan_read_doc', { id: docId, format: 'html' })
+  check('read_doc 非法 format 回落为 text', fallbackFormat.ok && /追加的结论/.test(fallbackFormat.text) && !fallbackFormat.text.includes('<'), fallbackFormat.text.slice(0, 120))
+
+  // search 无命中
+  const noHit = await callTool('siyuan_search', { query: '绝对不存在的关键词zzz' })
+  check('search 无命中时给出可读提示', noHit.ok && /没有命中/.test(noHit.text), noHit.text)
+
+  // sql 空结果
+  const emptySql = await callTool('siyuan_sql', { stmt: "SELECT type FROM blocks WHERE id = 'blk-none'" })
+  check('sql 无结果时提示（没有结果）', emptySql.ok && /没有结果/.test(emptySql.text), emptySql.text)
+
+  // get_child_blocks 空结构
+  const emptyChildren = await callTool('siyuan_get_child_blocks', { id: 'blk-nope' })
+  check('get_child_blocks 空结构时给出提示', emptyChildren.ok && /没有子块/.test(emptyChildren.text), emptyChildren.text)
+
+  // list_docs 空目录
+  const emptyDir = await callTool('siyuan_list_docs', { path: '/根本不存在的目录' })
+  check('list_docs 空目录时给出提示', emptyDir.ok && /没有子文档/.test(emptyDir.text), emptyDir.text)
+}
+
+// goLayout / 日记路径渲染：单趟替换的回归（顺序替换会把 2026 变成 2126）
+console.log('— 日记路径渲染 —')
+{
+  const { goLayout, renderDailyPath, parseDateArg } = plugin.internals
+  const date = parseDateArg('2026-09-12')
+  check('goLayout 渲染 2006/01/02', goLayout(date, '2006/01/02') === '2026/09/12', goLayout(date, '2006/01/02'))
+  check('goLayout 渲染 2006-01-02 不会产出 2126', goLayout(date, '2006-01-02') === '2026-09-12', goLayout(date, '2006-01-02'))
+  check('goLayout 渲染时间片段', goLayout(new Date(2026, 8, 12, 7, 5, 3), '15:04:05') === '07:05:03', goLayout(new Date(2026, 8, 12, 7, 5, 3), '15:04:05'))
+  check('goLayout 渲染 Jan / Mon', goLayout(date, 'Jan Mon') === 'Sep Sat', goLayout(date, 'Jan Mon'))
+  check('renderDailyPath 展开 {{now | date}}', renderDailyPath('/daily note/{{now | date "2006/01/02"}}', date) === '/daily note/2026/09/12', renderDailyPath('/daily note/{{now | date "2006/01/02"}}', date))
+  check('renderDailyPath 支持多个占位符', renderDailyPath('/{{now | date "2006"}}/{{now | date "01"}}', date) === '/2026/09', renderDailyPath('/{{now | date "2006"}}/{{now | date "01"}}', date))
+  check('renderDailyPath 原样保留无占位符模板', renderDailyPath('/固定路径', date) === '/固定路径')
+}
+
 // ── 鉴权与请求体 ────────────────────────────────────────────────────────────
 
 console.log('— 请求面 —')
@@ -523,8 +609,9 @@ await mock.close()
 console.log('')
 if (failures.length === 0) {
   console.log('全部通过 ✅')
+  cleanupHome()
   process.exit(0)
 }
-console.log(`${failures.length} 项失败：`)
+console.log(`${failures.length} 项失败（临时 home 保留在 ${TEST_HOME}）：`)
 for (const failure of failures) console.log(' - ' + failure)
 process.exit(1)
