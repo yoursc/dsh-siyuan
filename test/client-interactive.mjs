@@ -1,134 +1,80 @@
 /**
- * dsh-siyuan 客户端交互层测试。
+ * dsh-siyuan 设置页交互层：用可执行的 hooks 替身 + fetch 替身驱动点击/输入，断言
+ * 「每张卡各自保存」「探测用草稿」「逐工具开关」这些交互约定真正落到请求体上。
  *
- * 与 client-render.mjs 的分工：那边只断言「渲染出来的静态结构」，这边真的**执行**设置页的
- * 交互路径 —— `api()` 的信封处理、`run()` 的错误态、保存 token/清除/加载笔记本/
- * 连接测试/保存设置，以及全开全关与复选框。
- *
- * 夹具来自宿主真实产出（`internals.buildStatePayload`），不是手抄的形状。
+ * 夹具来自宿主真实产出（`buildHostState()`），不手抄字段形状；`enabled` 由宿主自己解析。
+ * 覆盖不到的部分：真实 React 语义、CSS、浏览器事件——这些要等 dsh web 挂载后在页面上确认。
  *
  * 用法：node test/client-interactive.mjs
  */
 
 import fs from 'node:fs'
-import os from 'node:os'
-import path from 'node:path'
-import { createHooks, loadClientModule, renderOnce, findButton, flattenText } from './client-harness-lib.mjs'
+import { buildHostState, createHooks, findButton, findSwitch, flattenText, loadClientModule, renderOnce, switches } from './client-harness-lib.mjs'
 
 const failures = []
-/** 成功时清掉临时 home；失败时保留，便于取证（路径会随失败清单一起打印）。 */
-function cleanupHome() {
-  if (failures.length === 0) fs.rmSync(TEST_HOME, { recursive: true, force: true })
-}
-
 function check(label, condition, detail) {
   if (condition === true) console.log(`  ok   ${label}`)
   else {
-    failures.push(label + (detail === undefined ? '' : ` — ${detail}`))
+    failures.push(label)
     console.log(`  FAIL ${label}${detail === undefined ? '' : ' — ' + detail}`)
   }
 }
 
-// ── 宿主真实产出（夹具来源） ────────────────────────────────────────────────
+// ── 夹具（宿主真实产出） ───────────────────────────────────────────────────
 
-// 每次跑用独立临时目录：并行执行（或同机多个 CI job）不会互相删配置。
-const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'sy-client-interactive-'))
-fs.mkdirSync(`${TEST_HOME}/storages/siyuan`, { recursive: true })
-process.env.DSH_HOME = TEST_HOME
-fs.writeFileSync(
-  `${TEST_HOME}/storages/siyuan/config.json`,
-  JSON.stringify({
-    baseUrl: 'http://127.0.0.1:6806',
-    defaultNotebook: '20260723165907-3zj91ge',
-    tools: { read: true, write: true, daily: true, danger: false },
-  }),
-)
-
-const host = await import('../lib/index.js')
-const credentials = {
-  async describe() {
-    return { configured: true, source: 'credentials', writable: true }
-  },
-  async resolve() {
-    return { value: 'stored-token', source: 'credentials' }
-  },
+// 默认场景 = 出厂默认：read + daily 开（8 个），write + danger 关。
+const { home, payload } = await buildHostState({ toolState: { read: true, daily: true } })
+const stateForClient = {
+  ...payload,
+  // 展示用场景值（本机没有思源可探测）；其余字段全部来自宿主产出。
+  reachable: true,
+  version: '3.8.3',
+  token: { configured: true, source: 'credentials', writable: true },
 }
-const stateCtx = { get: (name) => (name === 'credentials' ? credentials : undefined), logger: { info: () => {}, warn: () => {} } }
+const TOOL_COUNT = stateForClient.tools.length
+const DEFAULT_ENABLED = stateForClient.tools.filter((entry) => entry.enabled).length
+check('夹具含全部工具定义（与开关无关）', TOOL_COUNT === 17 && DEFAULT_ENABLED === 8, `${TOOL_COUNT} / ${DEFAULT_ENABLED}`)
+check('夹具不回显 token 值', !JSON.stringify(stateForClient).includes('stored-token'))
 
-// 让真实插件注册工具，再取它真实的 getState 产出——夹具与线上同源。
-const registeredTools = []
-// 全部 17 个定义（含默认关闭的 danger 两个）：工具总数与开关无关，夹具要按真实情况给。
-const ALL_TOOL_SHAPE = [
-  ...Array.from({ length: 7 }, (_, i) => ({ name: `siyuan_read_${i}`, group: 'read' })),
-  ...Array.from({ length: 7 }, (_, i) => ({ name: `siyuan_write_${i}`, group: 'write' })),
-  ...Array.from({ length: 1 }, (_, i) => ({ name: `siyuan_daily_${i}`, group: 'daily' })),
-  ...Array.from({ length: 2 }, (_, i) => ({ name: `siyuan_danger_${i}`, group: 'danger' })),
-]
-const fakeInject = {
-  get: () => undefined,
-  effect: (callback) => {
-    callback()
-    return () => {}
-  },
-  logger: { info: () => {}, warn: () => {} },
-  tools: {
-    register: (definition) => {
-      registeredTools.push({ group: definition.group, definition })
+// ── 加载 bundle ────────────────────────────────────────────────────────────
+
+let runtime = createHooks()
+let renderingRuntime = null
+const { exportsObject } = await loadClientModule(() => ({
+  createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
+  useState: (initial) => renderingRuntime.hooks.useState(initial),
+  useCallback: (fn) => renderingRuntime.hooks.useCallback(fn),
+  useEffect: (fn) => renderingRuntime.hooks.useEffect(fn),
+}))
+let registered = null
+exportsObject.apply({
+  slots: {
+    inject: (_name, callback) => callback(),
+    register: (contract, component) => {
+      registered = { contract, component }
       return () => {}
     },
   },
-  webServer: { register: () => () => {} },
-}
-host.apply({
-  ...fakeInject,
-  inject: (_deps, callback) => callback(fakeInject),
-  get tools() {
-    throw new Error('cannot get property "tools" without inject')
-  },
-  get webServer() {
-    throw new Error('cannot get property "webServer" without inject')
-  },
 })
+const Section = registered.component
 
-// 夹具来自宿主真实产出（internals.buildStatePayload）。C5：buildStatePayload 会真实
-// 探测 config.baseUrl（本文件写的是 127.0.0.1:6806），本机恰好跑着思源时测试会打到
-// **真实实例**。生成夹具前临时换成必败 fetch，让探测不出网；计数器断言探测被替身接住。
-const realFetch = globalThis.fetch
-let probeHits = 0
-globalThis.fetch = async () => {
-  probeHits += 1
-  throw new TypeError('probe disabled by test')
-}
-const realState = await host.internals.buildStatePayload(stateCtx, registeredTools)
-globalThis.fetch = realFetch
-check('夹具生成未探测真实实例（探测被必败 fetch 替身接住）', probeHits >= 1, String(probeHits))
-const realGroups = [...new Set(realState.toolNames.map((entry) => entry.group))].sort()
-// 注册的只有默认开启的三组（15 个）；工具总数由全部定义决定，与开关无关。
-check('工具定义含分组信息（read/write 各 7、daily 1）', realGroups.join(',') === 'daily,read,write' && realState.toolNames.length === 15, `${realState.toolNames.length} / ${JSON.stringify(realGroups)}`)
-// getState 返回的是全部定义（17 个），与注册表里已开启的数量无关。
-const stateForClient = { ...realState, toolNames: ALL_TOOL_SHAPE }
-check('真实产出不回显 token 值', !JSON.stringify(realState).includes('stored-token'))
+// ── 可编程 fetch 替身 ──────────────────────────────────────────────────────
 
-// ── 可编程 fetch 替身 ───────────────────────────────────────────────────────
-
-let stateForFetch = realState
+let stateForFetch = stateForClient
 
 /**
- * 用真实的 Response 对象，让 `response.json()` 的行为与线上一致。
- * `overrides[method]` 支持：`{ok:false,message}`（宿主错误信封）、`{rawText}`（非 JSON）、
- * `{value}`（自定义成功值）、`{httpStatus}`（HTTP 层失败）。
- * `network`：fetch 直接网络失败；`timeout`：抛 TimeoutError（模拟 AbortSignal.timeout
- * 超时，C11）。每个调用记录 `hasSignal`（C11 守卫：api() 必须给 fetch 挂超时 signal）。
+ * 用真实的 Response 让 `response.json()` 行为与线上一致。
+ * `overrides[method]` 支持：`{ok:false,message}`（宿主错误信封）、`{rawText}`、`{value}`、
+ * `{httpStatus}`；`network` 直接网络失败；`timeout` 抛 TimeoutError（模拟 AbortSignal 超时）。
+ * 每个调用记录 body 与 hasSignal（api() 必须给 fetch 挂超时信号）。
  */
-function createFetchStub({ overrides = {}, network = false, timeout = false } = {}) {
+function createFetchStub({ overrides = {}, network = false, timeout = false, hang = [] } = {}) {
   const calls = []
   const stub = async (url, init) => {
     const method = String(url).replace('/siyuan/api/', '')
-    calls.push({
-      method,
-      body: init?.body === undefined ? undefined : JSON.parse(init.body),
-      hasSignal: init?.signal instanceof AbortSignal,
-    })
+    calls.push({ method, body: init?.body === undefined ? undefined : JSON.parse(init.body), hasSignal: init?.signal instanceof AbortSignal })
+    // `hang`：让某个路由永不 resolve，用来观察"请求进行中"时的界面（各卡是否互相锁死）。
+    if (hang.includes(method)) return new Promise(() => {})
     if (network) throw new TypeError('fetch failed')
     if (timeout) {
       const timeoutError = new Error('The operation was aborted due to timeout')
@@ -144,66 +90,61 @@ function createFetchStub({ overrides = {}, network = false, timeout = false } = 
     }
     if (method === 'getState') return Response.json({ ok: true, value: stateForFetch })
     if (method === 'updateConfig') {
+      // 宿主的语义：只覆盖 body 里出现的字段；tools 走逐工具解析（这里等价地映射 enabled）。
       const body = JSON.parse(init.body)
-      stateForFetch = { ...stateForFetch, config: { ...stateForFetch.config, ...body } }
+      const config = { ...stateForFetch.config }
+      if (typeof body.baseUrl === 'string') config.baseUrl = body.baseUrl
+      if (typeof body.defaultNotebook === 'string') config.defaultNotebook = body.defaultNotebook
+      if (body.tools !== null && typeof body.tools === 'object') config.tools = body.tools
+      const tools = stateForFetch.tools.map((entry) => (typeof body.tools?.[entry.name] === 'boolean' ? { ...entry, enabled: body.tools[entry.name] } : entry))
+      stateForFetch = { ...stateForFetch, config, tools }
       return Response.json({ ok: true, value: stateForFetch })
     }
-    if (method === 'testConnection') {
-      return Response.json({
-        ok: true,
-        value: {
-          ok: false,
-          version: '3.8.3',
-          tokenConfigured: true,
-          probes: [
-            { label: '系统版本', ok: true, detail: '3.8.3' },
-            { label: '列出笔记本', ok: false, detail: '思源接口 /api/notebook/lsNotebooks 失败：code=-1 msg=Auth failed' },
-            { label: 'SQL 查询', ok: true, detail: '[]' },
-          ],
-        },
-      })
+    if (method === 'setToken') {
+      stateForFetch = { ...stateForFetch, token: { configured: true, source: 'credentials', writable: true } }
+      return Response.json({ ok: true, value: stateForFetch })
     }
-    if (method === 'listNotebooks') return Response.json({ ok: true, value: { notebooks: [{ id: 'nb-a', name: '收件箱', closed: false }] } })
-    if (method === 'setToken') return Response.json({ ok: true, value: stateForFetch })
     if (method === 'clearToken') {
       stateForFetch = { ...stateForFetch, token: { configured: false, source: '', writable: true } }
       return Response.json({ ok: true, value: stateForFetch })
+    }
+    if (method === 'listNotebooks') {
+      return Response.json({ ok: true, value: { baseUrl: 'http://127.0.0.1:6806', notebooks: [{ id: 'nb-a', name: '收件箱', closed: false }] } })
+    }
+    if (method === 'testConnection') {
+      return Response.json({ ok: true, value: { ok: false, version: '', baseUrl: 'http://127.0.0.1:6806', tokenConfigured: false, tokenSource: '', probes: [{ label: '系统版本 /api/system/version', ok: false, detail: '思源接口失败：code=-1 msg=Auth failed' }] } })
     }
     return Response.json({ ok: true, value: null })
   }
   return { stub, calls }
 }
 
-// ── 加载客户端 bundle ───────────────────────────────────────────────────────
+// ── 渲染辅助 ───────────────────────────────────────────────────────────────
 
-let runtime = createHooks()
-// 注意：factory 只在加载时执行一次，不能用模块级 runtime（它会被每个用例替换）。
-// 组件的 props 里带着本次渲染的 runtime，hook 实现从那里取。
-const { exportsObject } = await loadClientModule(() => ({
-  createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
-  useState: (initial) => currentHooks().useState(initial),
-  useCallback: (fn) => currentHooks().useCallback(fn),
-  useEffect: (fn) => currentHooks().useEffect(fn),
-}))
-/** 当前渲染的 hook 运行时由 render() 设置。 */
-let renderingRuntime = null
-function currentHooks() {
-  if (renderingRuntime === null) throw new Error('组件在 render() 之外被渲染，拿不到 hook 运行时')
-  return renderingRuntime.hooks
+const render = () => {
+  renderingRuntime = runtime
+  return renderOnce(Section, {}, runtime, { ignoreEffects: true })
 }
-let registered = null
-exportsObject.apply({
-  slots: {
-    inject: (_name, callback) => callback(),
-    register: (contract, component) => {
-      registered = { contract, component }
-      return () => {}
-    },
-  },
-})
-const Section = registered.component
-
-/** 每个用例一套干净的 hook 运行时与 fetch 替身。 */
+const mountRender = () => {
+  renderingRuntime = runtime
+  return renderOnce(Section, {}, runtime)
+}
+const textOf = () => render().text
+const elementsOf = () => render().elements
+const messages = () =>
+  elementsOf()
+    .filter((element) => typeof element.props?.className === 'string' && element.props.className.startsWith('dsy-msg'))
+    .map((element) => flattenText([element]))
+    .join(' || ')
+const button = (label) => {
+  const hit = findButton(elementsOf(), label)
+  if (hit === undefined) throw new Error(`找不到按钮：${label}`)
+  return hit
+}
+const inputOf = (id) => elementsOf().find((element) => element.type === 'input' && element.props.id === id)
+const selectOf = () => elementsOf().find((element) => element.type === 'select')
+const callsOf = (stub, method) => stub.calls.filter((call) => call.method === method)
+/** 每个用例一套干净的 hook 运行时与 fetch 替身（并把宿主状态还原成出厂默认）。 */
 function startCase(options) {
   runtime = createHooks()
   stateForFetch = stateForClient
@@ -211,162 +152,282 @@ function startCase(options) {
   globalThis.fetch = fetchStub.stub
   return fetchStub
 }
-
-const render = () => {
-  renderingRuntime = runtime
-  return renderOnce(Section, { close: () => {} }, runtime, { ignoreEffects: true })
-}
-/** 挂载并等待组件内部的 load() 完成（useEffect 里调用的那一次）。 */
-const mountRender = () => {
-  renderingRuntime = runtime
-  return renderOnce(Section, { close: () => {} }, runtime)
-}
-const textOf = () => render().text
-const statusOf = () => {
-  const message = render().elements.find((element) => typeof element.props?.className === 'string' && element.props.className.startsWith('dsy-msg'))
-  return message === undefined ? '' : flattenText([message])
-}
-const button = (label) => {
-  const hit = findButton(render().elements, label)
-  if (hit === undefined) throw new Error(`找不到按钮：${label}`)
-  return hit
-}
-const checkboxes = () => render().elements.filter((element) => element.type === 'input' && element.props.type === 'checkbox')
-const tokenInput = () => render().elements.find((element) => element.type === 'input' && element.props.type === 'password')
-const callsOf = (stub, method) => stub.calls.filter((call) => call.method === method)
 async function mount() {
   mountRender()
   await runtime.flushEffects()
 }
+/**
+ * 再渲染一次并跑完 effect：模拟 React 在 state 更新后重跑 effect。宿主返回配置后的
+ * "自动拉笔记本列表"就走这一步（替身的 useEffect 不看依赖数组，每次渲染都重新登记）。
+ */
+async function settle() {
+  renderingRuntime = runtime
+  renderOnce(Section, {}, runtime)
+  await runtime.flushEffects()
+}
+
+// ── 加载路径 ───────────────────────────────────────────────────────────────
 
 console.log('— 加载路径 —')
 {
   const stub = startCase()
-  // 挂载渲染：这一步注册 useEffect（组件内部的 load）；此时尚未执行，所以还是加载态。
   mountRender()
   check('未加载时渲染加载态', /正在读取配置/.test(textOf()), textOf())
   await runtime.flushEffects()
-  // C8 守卫：effect 的返回值必须是 undefined。React 契约只允许 effect 返回清理函数
-  // 或 undefined，返回 promise 会在 dev 构建触发控制台报错、生产行为未定义。
+  // React 契约：effect 只能返回清理函数或 undefined，返回 promise 会触发控制台报错。
   check('挂载 effect 返回 undefined（不得返回 promise）', runtime.lastEffectReturn === undefined, String(runtime.lastEffectReturn))
-  // C11 守卫：api() 必须给 fetch 挂超时 signal（兜底超时的前提）。
-  check('api() 的 fetch 带超时取消信号', callsOf(stub, 'getState')[0]?.hasSignal === true, JSON.stringify(callsOf(stub, 'getState')[0]))
+  // api() 必须给 fetch 挂超时 signal（兜底超时的前提）。
+  check('api() 的 fetch 带超时取消信号', callsOf(stub, 'getState')[0]?.hasSignal === true)
+  check('挂载时自动调用宿主 getState 一次', callsOf(stub, 'getState').length === 1, JSON.stringify(stub.calls.map((call) => call.method)))
+  check('请求体是空对象', JSON.stringify(callsOf(stub, 'getState')[0]?.body) === '{}')
   const loaded = textOf()
-  check('挂载时自动调用宿主 getState 一次', callsOf(stub, 'getState').length === 1, JSON.stringify(stub.calls))
-  check('请求体是空对象', JSON.stringify(callsOf(stub, 'getState')[0]?.body) === '{}', JSON.stringify(callsOf(stub, 'getState')[0]?.body))
-  check('加载成功后渲染已加载分支', /工具开关/.test(loaded) && !/正在读取配置/.test(loaded), loaded.slice(0, 140))
-  check('初始 draft 来自宿主 config（15 = read7+write7+daily1）', /已启用 15 \/ 共 17/.test(loaded), loaded.slice(-160))
-  check('加载成功不显示错误', statusOf() === '', statusOf())
+  check('加载成功后渲染四张卡', ['连接', 'API token', '默认笔记本', '工具开关'].every((title) => loaded.includes(title)), loaded.slice(0, 160))
+  check('初始计数来自宿主 enabled（8/17）', /已启用 8 \/ 共 17 个/.test(loaded), loaded.slice(-200))
+  check('加载成功不显示错误', messages() === '', messages())
+  check('干净状态下提示已保存', /所有改动都已保存/.test(loaded), loaded.slice(-120))
 }
 
 console.log('— 错误态 —')
 {
   startCase({ overrides: { getState: { ok: false, message: '凭据服务不可用' } } })
   await mount()
-  check('宿主 ok:false 时显示错误文案', /读取配置失败：凭据服务不可用/.test(textOf()), textOf().slice(0, 160))
-  check('错误态用 err 样式', render().elements.some((element) => element.props?.className === 'dsy-msg err'))
+  check('宿主 ok:false 时显示错误文案', /读取配置失败：凭据服务不可用/.test(messages()), messages())
+  check('错误态用 err 样式', elementsOf().some((element) => element.props?.className === 'dsy-msg err'))
   check('错误时仍停在加载分支（state 为 null）', /正在读取配置/.test(textOf()) && !/工具开关/.test(textOf()), textOf().slice(0, 120))
 }
 {
   startCase({ overrides: { getState: { rawText: '<html>nope</html>' } } })
   await mount()
-  check('宿主返回非 JSON 时显示错误而不是崩', /读取配置失败/.test(textOf()), textOf().slice(0, 160))
+  check('宿主返回非 JSON 时显示错误而不是崩', /读取配置失败/.test(messages()), messages())
 }
 {
   startCase({ overrides: { getState: { httpStatus: 500 } } })
   await mount()
-  check('宿主 HTTP 失败时显示错误', /读取配置失败/.test(textOf()), textOf().slice(0, 160))
+  check('宿主 HTTP 失败时显示错误', /读取配置失败/.test(messages()), messages())
 }
 {
   startCase({ network: true })
   await mount()
-  check('网络失败时显示错误而不是崩', /读取配置失败/.test(textOf()), textOf().slice(0, 160))
+  check('网络失败时显示错误而不是崩', /读取配置失败/.test(messages()), messages())
 }
 {
-  // C11：AbortSignal.timeout 超时抛 TimeoutError，api() 要映射成可读文案，
-  // 不能把浏览器原文（"The operation was aborted…"）直接怼给用户。
+  // AbortSignal.timeout 抛的是 TimeoutError，api() 要映射成可读文案，不能把浏览器原文怼给用户。
   startCase({ timeout: true })
   await mount()
-  check('请求超时时显示可读文案而不是崩', /请求超时/.test(textOf()), textOf().slice(0, 160))
+  check('请求超时时显示可读文案而不是崩', /请求超时/.test(messages()), messages())
 }
 
-console.log('— 保存设置 —')
+// ── 连接卡：各自保存 + 草稿探测 ────────────────────────────────────────────
+
+console.log('— 连接卡：保存地址（只提交本卡字段）—')
 {
   const stub = startCase()
   await mount()
-  checkboxes()[3].props.onChange({ target: { checked: true } })
-  check('勾选后计数即时更新（未保存也生效）', /已启用 17 \/ 共 17/.test(textOf()), textOf().slice(-160))
-  await button('保存设置').props.onClick()
+  check('没改动时「保存地址」禁用', button('保存地址').props.disabled === true)
+  inputOf('dsy-base-url').props.onChange({ target: { value: 'http://127.0.0.1:9999' } })
+  check('改动后按钮可用', button('保存地址').props.disabled === false)
+  check('出现「撤销」', findButton(elementsOf(), '撤销') !== undefined)
+  check('未保存提示', /有未保存的改动/.test(textOf()), textOf().slice(-120))
+
+  await button('保存地址').props.onClick()
   const update = callsOf(stub, 'updateConfig')
-  check('保存设置调用 updateConfig', update.length === 1, JSON.stringify(stub.calls.map((call) => call.method)))
-  check('请求体是表单 draft（含刚勾选的 danger）', update[0]?.body?.tools?.danger === true && update[0]?.body?.baseUrl === 'http://127.0.0.1:6806', JSON.stringify(update[0]?.body))
-  check('保存成功后提示已保存', /已保存。/.test(statusOf()), statusOf())
-  check('保存后勾选框仍与 draft 一致', checkboxes()[3].props.checked === true)
+  check('保存地址调用 updateConfig', update.length === 1, JSON.stringify(stub.calls.map((call) => call.method)))
+  check('请求体**只有 baseUrl**（不夹带笔记本/开关）', JSON.stringify(update[0]?.body) === JSON.stringify({ baseUrl: 'http://127.0.0.1:9999' }), JSON.stringify(update[0]?.body))
+  check('保存后提示已保存', /地址已保存。/.test(messages()), messages())
+  check('保存后按钮回到禁用（草稿已对齐宿主）', button('保存地址').props.disabled === true)
+  check('保存后「撤销」消失', findButton(elementsOf(), '撤销') === undefined)
+  check('保存后重新回到"都已保存"', /所有改动都已保存/.test(textOf()), textOf().slice(-120))
 }
 {
-  startCase({ overrides: { updateConfig: { ok: false, message: '宿主的凭据服务不可用' } } })
+  startCase({ overrides: { updateConfig: { ok: false, message: 'baseUrl 不是合法的 http(s) 地址：「x」' } } })
   await mount()
-  await button('保存设置').props.onClick()
-  check('保存失败显示"保存失败："+ 宿主原因', /保存失败：宿主的凭据服务不可用/.test(statusOf()), statusOf())
+  inputOf('dsy-base-url').props.onChange({ target: { value: 'x' } })
+  await button('保存地址').props.onClick()
+  check('保存失败显示「保存地址失败：」+ 宿主原因', /保存地址失败：baseUrl 不是合法的 http/.test(messages()), messages())
 }
 
-console.log('— 工具开关按钮 —')
+console.log('— 连接卡：测试连接用草稿（不必先保存）—')
 {
-  startCase()
+  const stub = startCase()
   await mount()
-  await button('全关').props.onClick()
-  check('点「全关」后计数为 0', /已启用 0 \/ 共 17/.test(textOf()), textOf().slice(-160))
-  check('点「全关」后四个复选框都未勾选', checkboxes().every((element) => element.props.checked === false), JSON.stringify(checkboxes().map((element) => element.props.checked)))
-  await button('全开').props.onClick()
-  check('点「全开」后计数为 17', /已启用 17 \/ 共 17/.test(textOf()), textOf().slice(-160))
+  inputOf('dsy-base-url').props.onChange({ target: { value: 'http://127.0.0.1:7777' } })
+  inputOf('dsy-token').props.onChange({ target: { value: 'draft-token' } })
+  await button('测试连接').props.onClick()
+  const probeCall = callsOf(stub, 'testConnection')[0]
+  check('测试连接发的是页面里正在编辑的地址与 token', probeCall?.body?.baseUrl === 'http://127.0.0.1:7777' && probeCall?.body?.token === 'draft-token', JSON.stringify(probeCall?.body))
+  check('探测没有顺手保存配置', callsOf(stub, 'updateConfig').length === 0, JSON.stringify(stub.calls.map((call) => call.method)))
+  check('有失败项时给出错误提示', /有探测项失败，详见下方。/.test(messages()), messages())
+  check('失败项渲染出思源的 msg', /Auth failed/.test(textOf()), textOf().slice(-200))
+  check('探测明细显示实际探测的地址', /探测地址：http:\/\/127\.0\.0\.1:6806/.test(textOf()), textOf().slice(-200))
 }
+{
+  startCase({ overrides: { testConnection: { value: { ok: true, version: '3.8.3', baseUrl: 'http://127.0.0.1:6806', tokenConfigured: true, tokenSource: 'draft', probes: [{ label: '系统版本', ok: true, detail: '3.8.3' }] } } } })
+  await mount()
+  await button('测试连接').props.onClick()
+  check('全部探测通过时提示连接正常与版本', /连接正常，思源版本 3\.8\.3。/.test(messages()), messages())
+}
+
+// ── token 路径 ─────────────────────────────────────────────────────────────
 
 console.log('— token 路径 —')
 {
   const stub = startCase()
   await mount()
   await button('保存 token').props.onClick()
-  check('空 token 本地拒绝且不发请求', callsOf(stub, 'setToken').length === 0 && /token 为空/.test(statusOf()), `${JSON.stringify(stub.calls.map((call) => call.method))} / ${statusOf()}`)
+  check('空 token 本地拒绝且不发请求', callsOf(stub, 'setToken').length === 0 && /token 为空/.test(messages()), `${JSON.stringify(stub.calls.map((call) => call.method))} / ${messages()}`)
 
-  tokenInput().props.onChange({ target: { value: '  new-token  ' } })
+  inputOf('dsy-token').props.onChange({ target: { value: '  new-token  ' } })
   await button('保存 token').props.onClick()
   const setTokenCall = callsOf(stub, 'setToken')[0]
   check('保存 token 调用 setToken 并原样传值（trim 由宿主负责）', setTokenCall?.body?.token === '  new-token  ', JSON.stringify(setTokenCall?.body))
-  check('保存成功后清空输入框（不回显）', tokenInput().props.value === '', JSON.stringify(tokenInput().props.value))
-  check('保存成功后提示写入凭据库', /token 已存入宿主凭据库。/.test(statusOf()), statusOf())
+  check('保存成功后清空输入框（不回显）', inputOf('dsy-token').props.value === '')
+  check('保存成功后提示写入凭据库', /token 已存入宿主凭据库。/.test(messages()), messages())
 
   await button('清除').props.onClick()
   check('清除调用 clearToken', callsOf(stub, 'clearToken').length === 1, JSON.stringify(stub.calls.map((call) => call.method)))
-  check('清除后提示已清除', /已清除 token。/.test(statusOf()), statusOf())
+  check('清除后提示已清除', /已清除 token。/.test(messages()), messages())
 }
 
-console.log('— 笔记本与连接测试 —')
+// ── 默认笔记本 ─────────────────────────────────────────────────────────────
+
+console.log('— 打开页面自动拉笔记本列表 —')
+{
+  const stub = startCase()
+  await mount()
+  check('挂载本身不发笔记本请求（先拿配置）', callsOf(stub, 'listNotebooks').length === 0, JSON.stringify(stub.calls.map((call) => call.method)))
+  await settle()
+  check('配置到手后静默拉一次列表', callsOf(stub, 'listNotebooks').length === 1, JSON.stringify(stub.calls.map((call) => call.method)))
+  check('自动拉取带草稿地址（与手动点按钮同一套参数）', typeof callsOf(stub, 'listNotebooks')[0]?.body?.baseUrl === 'string', JSON.stringify(callsOf(stub, 'listNotebooks')[0]?.body))
+  check('自动拉取不刷消息（用户没点按钮）', messages() === '', messages())
+  check('列表已就位（下拉里有 nb-a）', elementsOf().some((element) => element.type === 'option' && element.props.value === 'nb-a'))
+}
+
+console.log('— 默认笔记本卡 —')
 {
   const stub = startCase()
   await mount()
   await button('加载笔记本').props.onClick()
   check('加载笔记本调用 listNotebooks', callsOf(stub, 'listNotebooks').length === 1, JSON.stringify(stub.calls.map((call) => call.method)))
-  check('加载后下拉出现新笔记本', render().elements.some((element) => element.type === 'option' && element.props.value === 'nb-a'), textOf().slice(-160))
-  check('加载后提示数量', /已加载 1 个笔记本。/.test(statusOf()), statusOf())
+  check('加载笔记本带草稿地址（不必先保存）', typeof callsOf(stub, 'listNotebooks')[0]?.body?.baseUrl === 'string', JSON.stringify(callsOf(stub, 'listNotebooks')[0]?.body))
+  check('加载后下拉出现新笔记本', elementsOf().some((element) => element.type === 'option' && element.props.value === 'nb-a'), textOf().slice(-200))
+  check('加载后提示数量', /已加载 1 个笔记本。/.test(messages()), messages())
 
-  await button('测试连接').props.onClick()
-  check('测试连接调用 testConnection', callsOf(stub, 'testConnection').length === 1, JSON.stringify(stub.calls.map((call) => call.method)))
-  check('有失败项时给出错误提示', /有探测项失败，详见下方。/.test(statusOf()), statusOf())
-  check('失败项渲染出思源的 msg', /Auth failed/.test(textOf()))
+  selectOf().props.onChange({ target: { value: 'nb-a' } })
+  check('选完笔记本后「保存笔记本」可用', button('保存笔记本').props.disabled === false)
+  await button('保存笔记本').props.onClick()
+  const update = callsOf(stub, 'updateConfig')
+  check('保存笔记本只提交 defaultNotebook', JSON.stringify(update[0]?.body) === JSON.stringify({ defaultNotebook: 'nb-a' }), JSON.stringify(update[0]?.body))
+  check('保存笔记本后按钮回到禁用', button('保存笔记本').props.disabled === true)
+}
+
+// ── 工具开关（逐个工具） ───────────────────────────────────────────────────
+
+console.log('— 工具开关：逐工具 —')
+{
+  const stub = startCase()
+  await mount()
+  const searchSwitch = findSwitch(elementsOf(), 'siyuan_search')
+  check('每个工具一个椭圆开关（21 = 17 工具 + 4 组）', switches(elementsOf()).length === 21, String(switches(elementsOf()).length))
+  searchSwitch.props.onClick()
+  check('关掉一个工具后计数减一（8 → 7）', /已启用 7 \/ 共 17 个/.test(textOf()), textOf().slice(-200))
+  check('只动这一个工具', findSwitch(elementsOf(), 'siyuan_sql').props['aria-checked'] === true)
+
+  await button('保存开关').props.onClick()
+  const body = callsOf(stub, 'updateConfig')[0]?.body
+  const toolKeys = Object.keys(body?.tools ?? {})
+  check('保存开关提交**完整**的逐工具映射（17 个键，宿主整层替换）', toolKeys.length === TOOL_COUNT && toolKeys.every((key) => key.startsWith('siyuan_')), `${toolKeys.length}: ${toolKeys.slice(0, 3).join(',')}`)
+  check('提交里 siyuan_search 为 false，其余保持原状', body?.tools?.siyuan_search === false && body?.tools?.siyuan_sql === true && body?.tools?.siyuan_delete_block === false, JSON.stringify({ search: body?.tools?.siyuan_search, sql: body?.tools?.siyuan_sql, del: body?.tools?.siyuan_delete_block }))
+  check('保存开关不夹带地址与笔记本', body?.baseUrl === undefined && body?.defaultNotebook === undefined, JSON.stringify(body))
+  check('保存后提示已生效', /工具开关已生效/.test(messages()), messages())
+  check('保存后按钮回到禁用（对齐宿主返回的 enabled）', button('保存开关').props.disabled === true)
+}
+
+console.log('— 工具开关：组开关与批量 —')
+{
+  startCase()
+  await mount()
+  const writeGroup = findSwitch(elementsOf(), '写入整组开关')
+  check('整组全关时组开关是关的', writeGroup.props['aria-checked'] === false)
+  writeGroup.props.onClick()
+  check('整组打开后计数 8 → 15', /已启用 15 \/ 共 17 个/.test(textOf()), textOf().slice(-200))
+  check('组内 7 个开关全开', ['siyuan_create_doc', 'siyuan_rename_doc', 'siyuan_move_doc'].every((name) => findSwitch(elementsOf(), name).props['aria-checked'] === true))
+
+  findSwitch(elementsOf(), 'siyuan_create_doc').props.onClick()
+  check('组内只开一部分时组开关是 mixed', findSwitch(elementsOf(), '写入整组开关').props['aria-checked'] === 'mixed', String(findSwitch(elementsOf(), '写入整组开关').props['aria-checked']))
+
+  await button('全部停用').props.onClick()
+  check('「全部停用」后计数为 0', /已启用 0 \/ 共 17 个/.test(textOf()), textOf().slice(-200))
+  check('「全部停用」后所有工具开关都关', switches(elementsOf()).filter((element) => !String(element.props['aria-label']).includes('整组')).every((element) => element.props['aria-checked'] === false))
+
+  await button('撤销').props.onClick()
+  check('撤销后回到"已保存"状态', /已启用 8 \/ 共 17 个/.test(textOf()) && /所有改动都已保存/.test(textOf()), textOf().slice(-200))
+}
+
+console.log('— 重新读取 —')
+{
+  startCase()
+  await mount()
+  findSwitch(elementsOf(), 'siyuan_search').props.onClick()
+  check('改动后页脚提示未保存', /有未保存的改动/.test(textOf()), textOf().slice(-140))
+  await button('重新读取').props.onClick()
+  check('重新读取丢弃草稿（回到宿主状态）', /已启用 8 \/ 共 17 个/.test(textOf()) && /所有改动都已保存/.test(textOf()), textOf().slice(-200))
+}
+
+console.log('— 工具行：整行可点 / 键盘 / 拖选保护 —')
+{
+  startCase()
+  await mount()
+  const row = findSwitch(elementsOf(), 'siyuan_sql')
+  row.props.onClick({ currentTarget: row })
+  check('点行内任意位置都能切（不再只有 34×20 的小圆钮可点）', /已启用 7 \/ 共 17 个/.test(textOf()), textOf().slice(-120))
+  row.props.onKeyDown({ key: ' ', preventDefault: () => {}, currentTarget: row })
+  check('空格键可切', /已启用 8 \/ 共 17 个/.test(textOf()), textOf().slice(-120))
+  row.props.onKeyDown({ key: 'Enter', preventDefault: () => {}, currentTarget: row })
+  check('回车键可切', /已启用 7 \/ 共 17 个/.test(textOf()), textOf().slice(-120))
+  row.props.onKeyDown({ key: 'a', preventDefault: () => {}, currentTarget: row })
+  check('其他按键不切', /已启用 7 \/ 共 17 个/.test(textOf()), textOf().slice(-120))
+
+  // 拖选文字：选区落在这一行里时，点击不该顺手把开关切了。
+  globalThis.window.getSelection = () => ({ isCollapsed: false, containsNode: (node) => node === row })
+  row.props.onClick({ currentTarget: row })
+  check('拖选本行文字后点击不会误切', /已启用 7 \/ 共 17 个/.test(textOf()), textOf().slice(-120))
+  globalThis.window.getSelection = () => ({ isCollapsed: false, containsNode: () => false })
+  row.props.onClick({ currentTarget: row })
+  check('选区不在本行时照常切换', /已启用 8 \/ 共 17 个/.test(textOf()), textOf().slice(-120))
+  delete globalThis.window.getSelection
 }
 {
-  startCase({ overrides: { testConnection: { value: { ok: true, version: '3.8.3', tokenConfigured: true, probes: [{ label: '系统版本', ok: true, detail: '3.8.3' }] } } } })
+  // 保存中：整行不可点也不可聚焦（pending 期间不给误操作的机会）
+  startCase({ hang: ['updateConfig'] })
   await mount()
-  await button('测试连接').props.onClick()
-  check('全部探测通过时提示连接正常与版本', /连接正常，思源版本 3\.8\.3。/.test(statusOf()), statusOf())
+  const row = findSwitch(elementsOf(), 'siyuan_search')
+  row.props.onClick({ currentTarget: row })
+  button('保存开关').props.onClick() // 不 await：updateConfig 永远挂着
+  const busyRow = findSwitch(elementsOf(), 'siyuan_search')
+  check('保存中：整行 aria-disabled 且移出 tab 序', busyRow.props['aria-disabled'] === true && busyRow.props.tabIndex === -1, JSON.stringify({ disabled: busyRow.props['aria-disabled'], tabIndex: busyRow.props.tabIndex }))
+  const frozen = textOf()
+  busyRow.props.onClick({ currentTarget: busyRow })
+  check('保存中点行不会改计数', textOf() === frozen, textOf().slice(-120))
+}
+
+console.log('— 各卡互不锁定 —')
+{
+  startCase({ hang: ['setToken'] })
+  await mount()
+  inputOf('dsy-token').props.onChange({ target: { value: 'tok' } })
+  button('保存 token').props.onClick() // 故意不 await：让 token 卡停在"进行中"
+  check('请求进行中的那张卡自己禁用', button('保存 token').props.disabled === true)
+  check('别的卡不受影响（工具开关仍可点）', findSwitch(elementsOf(), 'siyuan_search').props['aria-disabled'] !== true && findSwitch(elementsOf(), 'siyuan_search').props.tabIndex === 0, JSON.stringify({ disabled: findSwitch(elementsOf(), 'siyuan_search').props['aria-disabled'], tabIndex: findSwitch(elementsOf(), 'siyuan_search').props.tabIndex }))
+  check('别的卡不受影响（测试连接仍可点）', button('测试连接').props.disabled === false)
+  check('「重新读取」在有任何请求时都禁用（它会整体重载）', button('重新读取').props.disabled === true)
 }
 
 console.log('')
 if (failures.length === 0) {
   console.log('全部通过 ✅')
-  cleanupHome()
+  fs.rmSync(home, { recursive: true, force: true })
   process.exit(0)
 }
-console.log(`${failures.length} 项失败（临时 home 保留在 ${TEST_HOME}）：`)
+console.log(`${failures.length} 项失败（夹具目录保留在 ${home}）：`)
 for (const failure of failures) console.log(' - ' + failure)
 process.exit(1)

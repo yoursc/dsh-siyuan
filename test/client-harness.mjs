@@ -91,6 +91,7 @@ try {
   const element = registerCall.component({ close: () => {} })
   const text = JSON.stringify(element)
   check('未取到配置时渲染加载态而不是抛错', /正在读取配置/.test(text))
+  check('加载态也不带页内标题与简介（分区名由外壳负责）', !text.includes('"h2"') && !text.includes('把思源笔记接入'))
 } catch (error) {
   check('未取到配置时渲染加载态而不是抛错', false, error.message)
 }

@@ -408,7 +408,67 @@ console.log('— 路由：getState / updateConfig —')
   check('再次开启回到 17 个', (await call('updateConfig', { tools: { write: true, danger: true } }))?.payload?.ok === true && tools.length === 17, `tools=${tools.length}`)
 
   const reopened = await call('getState', {})
-  check('重新读取仍是 17 个工具', reopened.payload?.value?.toolNames?.length === 17, String(reopened.payload?.value?.toolNames?.length))
+  check('重新读取仍是 17 个工具', reopened.payload?.value?.tools?.length === 17, String(reopened.payload?.value?.tools?.length))
+  check('每个工具都带 enabled（客户端直接当表单初值）', reopened.payload?.value?.tools?.every((entry) => typeof entry.enabled === 'boolean' && typeof entry.name === 'string') === true)
+}
+
+console.log('— 路由：逐工具开关与旧配置迁移 —')
+{
+  // 这一段的起点：上一条把 write/danger 打开过，配置里还留着旧版组名键。
+  const before = await call('getState', {})
+  check('配置里仍是旧版组名键（迁移前）', before.payload?.value?.config?.tools?.read === true && before.payload?.value?.config?.tools?.siyuan_search === undefined, JSON.stringify(before.payload?.value?.config?.tools))
+
+  // 逐工具提交：设置页会发完整映射，这里故意只发两个键，验证没提到的工具不受影响。
+  const perTool = await call('updateConfig', { tools: { siyuan_search: false, siyuan_sql: false } })
+  const savedTools = perTool.payload?.value?.config?.tools ?? {}
+  check('逐工具写入后组名键退场、每个工具都有显式记录', savedTools.read === undefined && savedTools.siyuan_search === false && savedTools.siyuan_read_doc === true, JSON.stringify(savedTools))
+  check('关掉的两个工具被释放', tools.some((t) => t.name === 'siyuan_search') === false && tools.some((t) => t.name === 'siyuan_sql') === false, tools.map((t) => t.name).join(','))
+  check('没提到的同组工具保持原状（仍注册）', tools.some((t) => t.name === 'siyuan_read_doc') === true, tools.map((t) => t.name).join(','))
+  check('没提到的其他组也保持原状（write/danger 仍开着）', tools.some((t) => t.name === 'siyuan_create_doc') === true && tools.some((t) => t.name === 'siyuan_delete_block') === true, tools.map((t) => t.name).join(','))
+  check('落盘的是逐工具映射', JSON.parse(fs.readFileSync(TEST_HOME + '/storages/siyuan/config.json', 'utf8')).tools?.siyuan_search === false)
+
+  // 单个工具开回来，只影响它自己。
+  const reEnabled = await call('updateConfig', { tools: { siyuan_search: true } })
+  check('只开回一个工具不影响其他（仍是逐工具映射）', reEnabled.payload?.value?.config?.tools?.siyuan_search === true && reEnabled.payload?.value?.config?.tools?.siyuan_sql === false, JSON.stringify(reEnabled.payload?.value?.config?.tools))
+  check('开回后该工具重新注册', tools.some((t) => t.name === 'siyuan_search') === true)
+
+  // 解析规则用纯函数断言：不删跑着的配置文件（后面的路由断言还要靠它指向替身）。
+  const freshConfig = plugin.internals.normalizeConfig(undefined)
+  const groupDefaults = { read: true, write: false, daily: true, danger: false }
+  check('新装默认：read/daily 开、write/danger 关', Object.entries(groupDefaults).every(([group, on]) => plugin.internals.isToolEnabled(freshConfig, `siyuan_${group}`, group) === on))
+  const legacyConfig = plugin.internals.normalizeConfig({ tools: { read: false, write: true, daily: false, danger: true } })
+  check('旧版组名键逐组解析不变（迁移期不能改行为）', ['read', 'write', 'daily', 'danger'].every((group) => plugin.internals.isToolEnabled(legacyConfig, `siyuan_${group}`, group) === (group === 'write' || group === 'danger')))
+  const mixedConfig = plugin.internals.normalizeConfig({ tools: { read: true, siyuan_search: false } })
+  check('逐工具键优先于旧组名键', plugin.internals.isToolEnabled(mixedConfig, 'siyuan_search', 'read') === false && plugin.internals.isToolEnabled(mixedConfig, 'siyuan_sql', 'read') === true)
+}
+
+console.log('— 路由：探测用页面草稿（不落盘也能测） —')
+{
+  // 草稿给一个必然连不上的地址：探测必须按草稿走，否则"填了新地址、没保存就点测试连接"
+  // 测的是旧地址，结论会误导人。同时断言探测**不写配置**。
+  const baseUrlBefore = (await call('getState', {})).payload?.value?.config?.baseUrl
+  const draftProbe = await call('testConnection', { baseUrl: 'http://127.0.0.1:1', token: 'draft-token' })
+  const value = draftProbe.payload?.value
+  check('testConnection 回报实际探测的地址', value?.baseUrl === 'http://127.0.0.1:1', String(value?.baseUrl))
+  check('草稿 token 被当作已配置（不读凭据库）', value?.tokenConfigured === true && value?.tokenSource === 'draft', JSON.stringify({ tokenConfigured: value?.tokenConfigured, tokenSource: value?.tokenSource }))
+  check('草稿地址连不上时如实报失败', value?.ok === false, JSON.stringify(value?.probes).slice(0, 200))
+  check('探测不改动配置', (await call('getState', {})).payload?.value?.config?.baseUrl === baseUrlBefore, `${baseUrlBefore} → ${(await call('getState', {})).payload?.value?.config?.baseUrl}`)
+
+  const badDraft = await call('testConnection', { baseUrl: 'not a url' })
+  check('草稿地址非法时明确报错（与保存同一套判据）', badDraft.payload?.ok === false && /http/.test(badDraft.payload?.error?.message ?? ''), JSON.stringify(badDraft.payload))
+
+  // 反向验证：把**配置**指到死地址，草稿指向替身 —— 探测要是还用配置就该失败。这样
+  // "用的是草稿"这件事不靠文案自证（只断言 ok:false 会因为没 token 而误绿）。
+  await call('updateConfig', { baseUrl: 'http://127.0.0.1:1' })
+  const authorizedBefore = mock === null ? 0 : mock.state.requests.filter((entry) => entry.path === '/api/notebook/lsNotebooks' && entry.authorized === true).length
+  const revived = await call('listNotebooks', { baseUrl: DEFAULT_BASE, token: mock === null ? undefined : mock.token })
+  check('配置指向死地址时，草稿地址仍能拉到笔记本', revived.payload?.ok === true && Array.isArray(revived.payload?.value?.notebooks) && revived.payload.value.notebooks.length > 0, JSON.stringify(revived.payload).slice(0, 200))
+  if (mock !== null) {
+    const authorizedAfter = mock.state.requests.filter((entry) => entry.path === '/api/notebook/lsNotebooks' && entry.authorized === true).length
+    check('探测用的是草稿 token（替身记为已授权）', authorizedAfter > authorizedBefore, `${authorizedBefore} → ${authorizedAfter}`)
+  }
+  await call('updateConfig', { baseUrl: DEFAULT_BASE })
+  check('baseUrl 已还原（后面的断言依赖它指向替身）', (await call('getState', {})).payload?.value?.config?.baseUrl === DEFAULT_BASE)
 }
 
 

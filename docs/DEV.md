@@ -15,18 +15,47 @@
 
 要点：
 
-- **配置**：`$DSH_HOME/storages/siyuan/config.json`（地址 / 默认笔记本 / 四组开关）。写入是
+- **配置**：`$DSH_HOME/storages/siyuan/config.json`（地址 / 默认笔记本 / 逐工具开关）。写入是
   「临时文件 + `fsync` + `rename`」；读取时文件损坏会**回退默认值并记警告**（同一份坏文件只警告一次）。
   `baseUrl` 必须是合法 http(s) 地址：设置页保存时直接拒绝非法值，配置文件里读到非法值（手改/旧版写入）
   也回退默认并告警。
-- **凭据**：token 存宿主凭据库的 `SIYUAN_TOKEN`，页面只报告「已配置 / 来源 / 可写」，永不回显。
+- **工具开关的形状与迁移**：`tools` 是**逐工具**的布尔映射（`{ "siyuan_search": false }`）。
+  解析只有一处 —— `isToolEnabled(config, name, group)`，三级顺序：
+  逐工具键 → 旧版组名键（`{ "read": true }`，迁移期继续兜底）→ `TOOL_GROUP_DEFAULTS[group]`（新装/新工具）。
+  因此**旧配置文件不用改写**，行为逐组不变；设置页按工具保存一次（提交 17 个键的完整映射）时，
+  `updateConfig` 会把未提到工具的当前结论固化成显式记录、再整层替换，旧组名键就此退场。
+  默认值只能在这里兜底：`normalizeConfig` 是纯函数、不看工具清单，补默认值会补错组。
+- **设置页的交互契约**：四张卡（连接 / API token / 默认笔记本 / 工具开关）**各自保存**，
+  每张卡只提交自己的字段（`updateConfig` 本来就接受部分字段），各自持有 pending 与消息，
+  互不锁定；脏值 = 草稿 vs 宿主快照的现算。`testConnection` / `listNotebooks` 接受
+  `body.baseUrl` / `body.token`，**优先用页面正在编辑的草稿**（否则"改了地址没保存就点测试"
+  测的是旧地址）；非法草稿地址与保存共用 `normalizeBaseUrlInput` 一套判据。打开页面时还会在
+  `state.reachable === true` 下**静默**拉一次笔记本列表（失败不写消息，用户没点那个按钮）；
+  列表没回来时下拉显示已保存 id 并标注"已保存"，**不能**提前断言"不在当前列表中"。
+- **凭据**：token 存宿主凭据库的 `SIYUAN_TOKEN`，页面只报告状态（徽标文案如
+  `token 已配置 · 来自环境变量 · 页面不可改`），永不回显值。徽标住在 **API token 卡**，
+  不要跟"可达"挤在连接卡标题行——那样会被读成"这个连接只读"。
   没有凭据服务时回退到进程环境变量（因此真实部署常见 `source: "env"`、页面输入框置灰）。
-- **工具动态注册**：`syncTools()` 按开关注册/释放；分组挂在工具定义上（`definition.group`），
-  设置页据此算「已启用 N / 共 M」。
+  草稿 token 只在探测请求里出现（宿主的 `tokenState.source` 会回 `"draft"`），不会被落盘。
+- **工具动态注册**：`syncTools()` 按**逐个工具**的开关注册/释放；分组挂在工具定义上
+  （`definition.group`），设置页据此排列与算「已启用 N / 共 M」。
 - **取消**：工具调用的 `AbortSignal` 经 `createApi(ctx, signal)` 贯通到 HTTP 请求（`AbortSignal.any`
   组合超时）与删除复核的可中断 sleep；取消抛 `name === 'AbortError'`，dsh-tools 据此标成 `ABORTED`。
 - **客户端 bundle 不走构建**：手写 `React.createElement`，只 `require("react")`。**不要给它加别的
   模块引用**——client-modules 只提供 `react`，其它 specifier 会变成运行时请求。
+- **样式标签必须挂在模块 id 上**：`data-plugin` = **包名**（与 `__ModuleLoader__.load({id})` 一致），
+  `data-plugin-css` = `<包名>/client.css`（同页去重键）。`client-hmr` 重载时按
+  `style[data-plugin=<模块 id>]` 删旧样式再重放；写成裸名（`dsh-siyuan`）会让这条清理永远命中不了，
+  结果是 **JS 热更新了、CSS 一直是旧的**（表现为"新结构配旧样式"，只能整页刷新）。
+  `test/client-navicon.mjs` 在假 document 上断言了这两个属性，改坏会变红。
+- **设置面板的导航图标是兜底来的**：DSH 外壳把导航图标硬编码在 `navIcon(id)` 里——只有
+  `models` / `agent-presets` / `plugins` 有专属图形，其余分区（含本插件的 `siyuan`）一律回退齿轮，
+  而 `settings.section` 槽位没有 icon 选项（上游 Discussion #4502 尚无官方回应）。所以
+  `lib/client.js` 在面板挂载后，把「思源笔记」那一行的齿轮换成思源官方 logo 的单色版
+  （`patchNavCell` / `watchNavIcon`，用 `MutationObserver` + rAF 合并扫描，按**行文案**认行）。
+  这段依赖外壳 DOM：上游给了图标 API（或改了导航结构）就该删掉，失效时只是退回齿轮，不影响
+  设置页功能。真机效果刷新页面即可看（客户端 bundle 免重启）；Node 侧只有
+  `test/client-navicon.mjs` 的 DOM 替身守着，**别把它当成真机验证**。
 
 ## 目录
 
@@ -35,13 +64,14 @@
 | `lib/index.js` | 宿主半场 |
 | `lib/client.js` | 客户端 bundle（`window.__ModuleLoader__.load`，无构建步骤） |
 | `cordis.patch.yml` | 发布用 `dsh.bundle.patch` 层（`dsh plugin add` 通道） |
-| `test/harness.mjs` | 假 ctx 调 `apply()`：工具 schema、分组开关动态注册/释放、设置页路由（围栏、请求体、凭据路径）、卸载路径 |
+| `test/harness.mjs` | 假 ctx 调 `apply()`：工具 schema、逐工具开关的动态注册/释放、旧配置迁移、设置页路由（围栏、请求体、草稿探测、凭据路径）、卸载路径 |
 | `test/mock-siyuan.mjs` | 思源 API 本地替身（鉴权、`code` 信封、非幂等 create、异步落库、延时响应） |
 | `test/tools-e2e.mjs` | 对着替身跑通全部 17 个工具与错误面（含取消、删除复核窗口、笔记本校验） |
 | `test/client-harness.mjs` | 客户端 bundle 加载与 `settings.section` 槽位契约 |
-| `test/client-render.mjs` | 设置页「已加载」分支的渲染断言 |
-| `test/client-harness-lib.mjs` | 客户端测试共享支持：bundle 加载 + 可执行 React 替身 + 元素查找 |
-| `test/client-interactive.mjs` | 设置页交互层：fetch 替身驱动加载/错误/保存/token/笔记本/连接测试 |
+| `test/client-navicon.mjs` | 导航图标兜底：DOM 替身驱动「面板挂载 → 换掉齿轮」，含幂等/不误伤/卸载 |
+| `test/client-render.mjs` | 设置页「已加载」分支的结构断言（四张卡、17 个工具行、开关与宿主 enabled 一致、干净态按钮禁用） |
+| `test/client-harness-lib.mjs` | 客户端测试共享支持：bundle 加载 + 宿主夹具（`buildHostState`）+ 可执行 React 替身 + 元素查找 |
+| `test/client-interactive.mjs` | 设置页交互层：fetch 替身驱动加载/错误、四张卡各自保存（请求体只带本卡字段）、草稿探测、逐工具与整组开关 |
 | `package.json` | `dsh.bundle.patch`（安装通道）、`dshhub`（目录元数据）、`files`（发布清单） |
 
 ## 本地开发安装
@@ -96,7 +126,8 @@ DSH_HOME=/tmp/sy-probe node /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin
 
 ```bash
 npm install                    # 只有 devDependency：@deepseek-ai/dsh-tools（官方 schema 校验器）
-npm test                       # 5 个套件，248 项断言；自包含，不需要真实思源
+npm test                       # 6 个套件全绿；自包含，不需要真实思源
+                               # 断言条数会随开发变化，别在文档里写死（要数字就跑一遍数 "  ok "）
 node test/harness.mjs --live   # 可选：把干跑测试改成探测真实实例 127.0.0.1:6806
 ```
 
@@ -104,8 +135,12 @@ node test/harness.mjs --live   # 可选：把干跑测试改成探测真实实�
 
 - **默认不碰真实实例、不联网、不读环境变量**。harness 显式 `delete process.env.SIYUAN_TOKEN`，
   否则本机 shell 里的真实 token 会让「未配置」断言失败。
-- **夹具必须从宿主真实产出生成**（`internals.buildStatePayload`），不要手抄字段形状——
+- **夹具必须从宿主真实产出生成**（`internals.buildStatePayload`；客户端套件统一走
+  `client-harness-lib.mjs` 的 `buildHostState()`），不要手抄字段形状——
   手抄的夹具会在字段改名时两边一起错、测试仍然绿。
+- **客户端用例的状态由真实 hook 运行时驱动**（`createHooks()` + fetch 替身），**不要按 hook
+  位置注入状态**：旧写法（七元数组按顺序注入 `useState`）在 hook 增删时会静默错位、测试照样绿。
+  渲染断言只读元素树，交互断言直接调 `props.onClick/onChange`。
 - **替身刻意复刻真实行为，改测试时别把它们"修"掉**：文档块走 `deleteBlock` 静默 no-op、
   删除异步落库（`deleteDelayMs`）、`createDocWithMd` 非幂等、`updateBlock` 只保留第一段、
   延时响应（`responseDelayMs`）、SQL 只认已知语句形状（不认识的形状报错而不是返回空数组）。
@@ -129,7 +164,7 @@ npm publish                       # publishConfig 已带 registry 与 access:pub
 **发布前必查**（本机全局 registry 是 npmmirror 镜像源，不能发布，靠 `publishConfig` 兜住）：
 
 ```bash
-npm test                       # 5 套件全绿
+npm test                       # 6 套件全绿
 npm pack --dry-run             # 6 个文件、30.4 kB
 npm view <包名> --registry https://registry.npmjs.org/   # 预期 404（未占用）
 ```
@@ -173,7 +208,7 @@ GitHub 地址按 `github.com/yoursc/dsh-siyuan` 填写，与账号不一致时�
 | `siyuan_remove_doc` 报「删除未生效」，但文档其实已删 | 思源删除是**异步落库**，返回成功那一刻 `blocks` 行还在 | 删除后用 `waitUntilBlockGone` 复核；替身用 `deleteDelayMs` 复现 |
 | 发布前审计发现 `dsh.engines.dsh: ">=0.1.2-rc.1"` 把 dsh 的 `latest`（`0.1.5-rc.1`）判为不兼容 | semver 仅对「与比较器同元组」的预发布放行；dsh 只发过预发布版 | 两处都改成 `^0.1.5-rc.1`，并在本文件记下「跟进新 rc 线要手工更新」 |
 | 日记路径渲染成 `2126-09-12` | Go layout 顺序替换时 `02` 命中了已替换出的 `2026` | 改成单趟正则替换（`goLayout`） |
-| 设置页保存的改动没生效（如 `danger` 开关） | 页面上的改动必须先点「保存设置」才落盘 | 无需改码，操作上注意 |
+| 设置页保存的改动没生效（如 `danger` 开关） | 页面上的改动必须先点**那张卡自己的**保存按钮才落盘 | 无需改码，操作上注意 |
 | 取消工具调用后删除仍跑完整个复核 | 信号只在入口检查一次，`sleep` 不可中断 | 信号贯通到请求与退避等待；抛官方 `AbortError` |
 | 往不存在的笔记本写文档"成功" | `assertNotebook` 只看"有没有填"，替身也不校验 notebook | 写入前查 `lsNotebooks` 确认存在且未关闭；替身同步收紧 |
 

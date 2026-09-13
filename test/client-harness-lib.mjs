@@ -1,13 +1,80 @@
 /**
- * 客户端测试的共享支持：bundle 加载 + 一套「真的会更新状态」的 React 替身 + 元素查找。
+ * 客户端测试的共享支持：bundle 加载 + 宿主夹具 + 一套「真的会更新状态」的 React 替身 + 元素查找。
  *
  * 为什么需要它：`client-harness.mjs` / `client-render.mjs` 用的替身把 `useEffect` 设成 no-op、
- * 也不提供 setter，所以 `lib/client.js` 的交互路径（api() / run() / 保存 token / 开关按钮）
- * 一行都跑不到。这里给出一套最小但真实的 hooks 实现：`useState` 返回可用的 setter，
- * `useEffect` 在挂载后执行（可用 disableEffects 关掉以模拟"未加载"分支）。
+ * 也不提供 setter，所以 `lib/client.js` 的交互路径（api() / run() / 保存开关）一行都跑不到。
+ * 这里给出一套最小但真实的 hooks 实现：`useState` 返回可用的 setter，`useEffect` 在挂载后执行
+ * （可用 disableEffects 关掉以模拟"未加载"分支）。
  */
 
+import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
+
+let fixtureCount = 0
+
+/**
+ * 用**宿主真实产出**生成设置页夹具（`internals.buildStatePayload`），不手抄字段形状。
+ *
+ * 两步是必要的：`buildStatePayload` 的工具清单来自 `buildTools()` 的返回值，而测试里的假
+ * `tools.register` 只看得见**已启用**的工具。所以先把四组全开跑一次 mount 拿到全部 17 个定义，
+ * 再按 toolState 改写配置文件，然后才生成 payload —— 这样 `tools[].enabled` 是宿主自己算的，
+ * 客户端测试里的开关断言跟线上同一套判据。
+ *
+ * @param {object} options
+ * @param {object} options.toolState - 写进配置文件的 tools 字段（逐工具键或旧版组名键都行）
+ * @returns {Promise<{home: string, payload: object, registered: object[]}>}
+ */
+export async function buildHostState({ toolState = { read: true, daily: true } } = {}) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sy-client-fixture-'))
+  const configDir = path.join(home, 'storages', 'siyuan')
+  fs.mkdirSync(configDir, { recursive: true })
+  const configFile = path.join(configDir, 'config.json')
+  const writeConfigFile = (tools) =>
+    fs.writeFileSync(configFile, JSON.stringify({ baseUrl: 'http://127.0.0.1:6806', defaultNotebook: '20260723165907-3zj91ge', tools }))
+  process.env.DSH_HOME = home
+
+  // 第一次：四组全开，只为拿全 17 个工具定义。
+  writeConfigFile({ read: true, write: true, daily: true, danger: true })
+  const host = await import(`../lib/index.js?fixture=${(fixtureCount += 1)}`)
+  const registered = []
+  const logger = { info: () => {}, warn: () => {} }
+  const inject = {
+    get: () => undefined,
+    effect: (callback) => {
+      callback()
+      return () => {}
+    },
+    logger,
+    tools: {
+      register: (definition) => {
+        registered.push({ group: definition.group, definition })
+        return () => {}
+      },
+    },
+    webServer: { register: () => () => {} },
+  }
+  host.apply({
+    ...inject,
+    inject: (_deps, callback) => callback(inject),
+    get tools() {
+      throw new Error('cannot get property "tools" without inject')
+    },
+    get webServer() {
+      throw new Error('cannot get property "webServer" without inject')
+    },
+  })
+
+  // 第二次：换成用例要的开关状态，再让宿主自己解析 enabled。
+  writeConfigFile(toolState)
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async () => {
+    throw new TypeError('probe disabled by test')
+  }
+  const payload = await host.internals.buildStatePayload({ get: () => undefined, logger }, registered)
+  globalThis.fetch = realFetch
+  return { home, payload, registered }
+}
 
 /** 加载客户端 bundle，返回它导出的 apply / inject。 */
 export async function loadClientModule(makeReact) {
@@ -145,7 +212,9 @@ export function renderOnce(Component, props, runtime, { ignoreEffects = false } 
     if (typeof node !== 'object' || node.type === undefined) return
     elements.push(node)
     if (typeof node.type === 'function') {
-      walk(node.type(node.props))
+      // React 会把子节点塞进 props.children；替身本来只存在元素上，这里补齐，
+      // 否则 Card/Note 这类「读 props.children」的组件在测试里渲染成空。
+      walk(node.type({ ...(node.props ?? {}), children: node.children }))
       return
     }
     for (const child of node.children ?? []) walk(child)
@@ -169,7 +238,9 @@ export function flattenText(elements) {
     }
     if (typeof node !== 'object' || node.type === undefined) return
     if (typeof node.type === 'function') {
-      walk(node.type(node.props))
+      // React 会把子节点塞进 props.children；替身本来只存在元素上，这里补齐，
+      // 否则 Card/Note 这类「读 props.children」的组件在测试里渲染成空。
+      walk(node.type({ ...(node.props ?? {}), children: node.children }))
       return
     }
     for (const child of node.children ?? []) walk(child)
@@ -196,4 +267,29 @@ export function findButton(elements, label) {
 /** 按 className 片段找节点。 */
 export function findByClass(elements, className) {
   return elements.find((element) => typeof element.props?.className === 'string' && element.props.className.includes(className))
+}
+
+/** 所有椭圆开关（`button[role=switch]`）。 */
+export function switches(elements) {
+  return elements.filter((element) => element.props?.role === 'switch')
+}
+
+/** 按 aria-label 找开关：`label` 用包含匹配，工具开关的 aria-label 是「中文（siyuan_xxx）」。 */
+export function findSwitch(elements, label) {
+  return switches(elements).find((element) => String(element.props['aria-label']).includes(label))
+}
+
+/** 取某张卡片元素（按卡内文本包含 title 判定；标题是卡里的第一段文本）。 */
+export function cardOf(elements, title) {
+  return elements.find((element) => element.props?.className === 'dsy-card' && flattenText([element]).startsWith(title))
+}
+
+/**
+ * 卡片标题行（卡元素第一个子节点）的文本。用来断言"哪个徽标在哪张卡里"——
+ * 例如 token 状态徽标必须住在 API token 卡，而不是挨着"可达"待在连接卡。
+ */
+export function cardHeaderText(elements, title) {
+  const card = cardOf(elements, title)
+  if (card === undefined) throw new Error(`找不到卡片：${title}`)
+  return flattenText([card.children?.[0]])
 }

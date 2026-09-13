@@ -27,7 +27,7 @@
   "dshhub": {
     "schemaVersion": 1,
     "displayName": "dsh-siyuan",
-    "summary": "把思源笔记接入 DeepSeek Harness：17 个 siyuan_* 工具（检索/读取/写入/移动/删除/日记/属性）+ 独立设置页，token 存宿主凭据库，工具按分组开关。",
+    "summary": "把思源笔记接入 DeepSeek Harness：17 个 siyuan_* 工具（检索/读取/写入/移动/删除/日记/属性）逐个开关 + 独立设置页（连接/token/笔记本/工具开关各自保存），token 存宿主凭据库。",
     "categories": [
       "知识库",
       "Web UI"
@@ -47,7 +47,7 @@
     }
   },
   "scripts": {
-    "test": "node test/harness.mjs && node test/tools-e2e.mjs && node test/client-harness.mjs && node test/client-render.mjs && node test/client-interactive.mjs"
+    "test": "node test/harness.mjs && node test/tools-e2e.mjs && node test/client-harness.mjs && node test/client-navicon.mjs && node test/client-render.mjs && node test/client-interactive.mjs"
   },
   "keywords": [
     "dsh",
