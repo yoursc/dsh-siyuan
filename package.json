@@ -1,6 +1,6 @@
 {
   "name": "@yoursc/dsh-siyuan",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "description": "DeepSeek Harness plugin: SiYuan (思源笔记) integration — host-side siyuan_* tools for search/read/write plus a dedicated settings page in the Web client.",
   "type": "module",
   "main": "lib/index.js",
@@ -15,7 +15,7 @@
   ],
   "dsh": {
     "engines": {
-      "dsh": ">=0.1.2-rc.1"
+      "dsh": "^0.1.5-rc.1"
     },
     "bundle": {
       "patch": "./cordis.patch.yml"
@@ -42,7 +42,7 @@
       ]
     },
     "compatibility": {
-      "dsh": ">=0.1.2-rc.1",
+      "dsh": "^0.1.5-rc.1",
       "node": ">=20"
     }
   },
@@ -61,6 +61,10 @@
   ],
   "engines": {
     "node": ">=20"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
   },
   "devDependencies": {
     "@deepseek-ai/dsh-tools": "^0.1.5-rc.1"
