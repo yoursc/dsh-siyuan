@@ -1,0 +1,185 @@
+# dsh-siyuan 开发与维护
+
+面向改这个插件的人。**用户请读 [README](../README.md)**；思源接口契约见
+[siyuan-api-cheatsheet](./siyuan-api-cheatsheet.md)；历史评审与已修问题见
+[code-review-2026-09-12](./code-review-2026-09-12.md)。
+
+## 架构
+
+两个半场，都是**零运行时依赖**：
+
+| 文件 | 角色 |
+|---|---|
+| `lib/index.js` | 宿主半场（ESM，只用 node 内建模块）：配置持久化、凭据读取、`/siyuan/api/*` 设置页路由、17 个 `siyuan_*` 工具的注册与执行 |
+| `lib/client.js` | 浏览器 bundle：在 `settings.section` 槽位注册「思源笔记」设置页 |
+
+要点：
+
+- **配置**：`$DSH_HOME/storages/siyuan/config.json`（地址 / 默认笔记本 / 四组开关）。写入是
+  「临时文件 + `fsync` + `rename`」；读取时文件损坏会**回退默认值并记警告**（同一份坏文件只警告一次）。
+  `baseUrl` 必须是合法 http(s) 地址：设置页保存时直接拒绝非法值，配置文件里读到非法值（手改/旧版写入）
+  也回退默认并告警。
+- **凭据**：token 存宿主凭据库的 `SIYUAN_TOKEN`，页面只报告「已配置 / 来源 / 可写」，永不回显。
+  没有凭据服务时回退到进程环境变量（因此真实部署常见 `source: "env"`、页面输入框置灰）。
+- **工具动态注册**：`syncTools()` 按开关注册/释放；分组挂在工具定义上（`definition.group`），
+  设置页据此算「已启用 N / 共 M」。
+- **取消**：工具调用的 `AbortSignal` 经 `createApi(ctx, signal)` 贯通到 HTTP 请求（`AbortSignal.any`
+  组合超时）与删除复核的可中断 sleep；取消抛 `name === 'AbortError'`，dsh-tools 据此标成 `ABORTED`。
+- **客户端 bundle 不走构建**：手写 `React.createElement`，只 `require("react")`。**不要给它加别的
+  模块引用**——client-modules 只提供 `react`，其它 specifier 会变成运行时请求。
+
+## 目录
+
+| 路径 | 作用 |
+|---|---|
+| `lib/index.js` | 宿主半场 |
+| `lib/client.js` | 客户端 bundle（`window.__ModuleLoader__.load`，无构建步骤） |
+| `cordis.patch.yml` | 发布用 `dsh.bundle.patch` 层（`dsh plugin add` 通道） |
+| `test/harness.mjs` | 假 ctx 调 `apply()`：工具 schema、分组开关动态注册/释放、设置页路由（围栏、请求体、凭据路径）、卸载路径 |
+| `test/mock-siyuan.mjs` | 思源 API 本地替身（鉴权、`code` 信封、非幂等 create、异步落库、延时响应） |
+| `test/tools-e2e.mjs` | 对着替身跑通全部 17 个工具与错误面（含取消、删除复核窗口、笔记本校验） |
+| `test/client-harness.mjs` | 客户端 bundle 加载与 `settings.section` 槽位契约 |
+| `test/client-render.mjs` | 设置页「已加载」分支的渲染断言 |
+| `test/client-harness-lib.mjs` | 客户端测试共享支持：bundle 加载 + 可执行 React 替身 + 元素查找 |
+| `test/client-interactive.mjs` | 设置页交互层：fetch 替身驱动加载/错误/保存/token/笔记本/连接测试 |
+| `package.json` | `dsh.bundle.patch`（安装通道）、`dshhub`（目录元数据）、`files`（发布清单） |
+
+## 本地开发安装
+
+```bash
+dsh plugin --profile web add /path/to/this/repo
+```
+
+`dsh plugin add` 转发给 profile 里的 pnpm 装上包，并读包里的 `dsh.bundle` 声明，
+**自动把包名写进 `dsh.profile.bundles`** —— 不需要手工编辑 profile 的任何文件。
+`link:` 安装，改完 `lib/` 重启 dsh web 即生效。
+
+<details>
+<summary>备选：手工软链挂载</summary>
+
+```bash
+ln -s /path/to/this/repo ~/.dsh/profiles/web/node_modules/@yoursc/dsh-siyuan
+```
+
+再在 `~/.dsh/profiles/web/cordis.patch.yml` 追加：
+
+```yaml
+- insert:
+    - id: siyuan
+      name: '@yoursc/dsh-siyuan'
+```
+
+手工挂载与 CLI 通道**只能二选一**：同时存在会让同一个插件挂两次、路由重复注册，profile 起不来。
+</details>
+
+## 开发循环：哪些改动需要重启
+
+| 改动 | 生效方式 |
+|---|---|
+| `lib/client.js` | **不用重启**。`dsh-client-hmr` 每 500ms 轮询 bundle 的 mtime/size，变了就重算 rev 并经 SSE 推给浏览器，刷新页面即新版 |
+| `lib/index.js` | **必须重启** dsh web。宿主插件由 loader 按 URL 缓存，Node ESM 不允许二次 import 同一 URL；`patchReload: live` 只监视补丁文件、不监视插件源码 |
+| `cordis.patch.yml` / profile 组合树 | 必须重启（本机 `patchReload: live` 实测不工作：原地写、`touch`、unlink+add 原子替换都试过） |
+
+重启：
+
+```bash
+docker restart deepseek-harness     # 或在 1Panel 里重启对应容器
+```
+
+想在不停主实例的情况下迭代，可以用隔离实例（真实 profile、状态写 `/tmp`、另开端口）：
+
+```bash
+DSH_HOME=/tmp/sy-probe node /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js web --host 127.0.0.1 --port 3099 --no-open
+```
+
+## 测试
+
+```bash
+npm install                    # 只有 devDependency：@deepseek-ai/dsh-tools（官方 schema 校验器）
+npm test                       # 5 个套件，248 项断言；自包含，不需要真实思源
+node test/harness.mjs --live   # 可选：把干跑测试改成探测真实实例 127.0.0.1:6806
+```
+
+设计约定：
+
+- **默认不碰真实实例、不联网、不读环境变量**。harness 显式 `delete process.env.SIYUAN_TOKEN`，
+  否则本机 shell 里的真实 token 会让「未配置」断言失败。
+- **夹具必须从宿主真实产出生成**（`internals.buildStatePayload`），不要手抄字段形状——
+  手抄的夹具会在字段改名时两边一起错、测试仍然绿。
+- **替身刻意复刻真实行为，改测试时别把它们"修"掉**：文档块走 `deleteBlock` 静默 no-op、
+  删除异步落库（`deleteDelayMs`）、`createDocWithMd` 非幂等、`updateBlock` 只保留第一段、
+  延时响应（`responseDelayMs`）、SQL 只认已知语句形状（不认识的形状报错而不是返回空数组）。
+- **临时 home 用 `mkdtempSync`**，失败时保留目录便于取证；替身的定时器在 `close()` 里清理。
+
+补一条断言时的自检：**先把修复摘掉，确认它会失败**。本仓库里 H1（日期翻滚）、H2（损坏配置）、
+H5（删除复核窗口）、H6（多段丢弃）、B1（请求中取消）、B3（工具计数）都是这么验证过的；
+其中 B1 的第一版断言其实测不出修复（新旧实现都会抛 `AbortError`），是靠"摘掉修复看是否变红"
+才发现并补强的。
+
+## 发布
+
+```bash
+npm version <patch|minor|0.0.x>   # 见下「版本策略」
+npm publish                       # publishConfig 已带 registry 与 access:public，无需再加参数
+```
+
+`npm pack --dry-run` 的清单应只含 `lib/` + `cordis.patch.yml`（README/LICENSE 由 npm 自带）。
+`files` 不含 `test/`：发布包里没有测试，属正常取舍。
+
+**发布前必查**（本机全局 registry 是 npmmirror 镜像源，不能发布，靠 `publishConfig` 兜住）：
+
+```bash
+npm test                       # 5 套件全绿
+npm pack --dry-run             # 6 个文件、30.4 kB
+npm view <包名> --registry https://registry.npmjs.org/   # 预期 404（未占用）
+```
+
+**版本策略**：首个公开版是 `0.0.1`（发 `latest`）。版本号语义要跟着**实际验证过的 dsh 版本**走，
+而不是跟着本体版本号：本插件的 `dsh.engines.dsh` 与 `dshhub.compatibility.dsh` 都声明
+`^0.1.5-rc.1`，理由见下条。
+
+**兼容范围为什么必须带 `-rc.N` 且精确到小版本**：semver 只在「比较器里的预发布元组与候选版本
+的元组相同」时才对预发布放行。因此 `>=0.1.2-rc.1` 会把 **`0.1.5-rc.1` / `0.1.5-rc.2` 全判为
+不兼容**（这正是 dsh 的 `latest` 与 `next`），而 `>=0.1.2-rc.1 <0.2.0` 也救不了——上界不改变该
+规则。想匹配 `0.1.5-rc.*`，范围里就必须出现 `0.1.5-rc.1` 这个元组。dsh 至今**只发布过预发布
+版本**，所以每跟进一条新的 rc 线，这个范围都要手工更新。改完用 npm 自带 semver 复核：
+
+```bash
+node -e "const s=require('/usr/local/lib/node_modules/npm/node_modules/semver');for(const v of ['0.1.5-rc.1','0.1.5-rc.2','0.1.5','0.2.0'])console.log(v,s.satisfies(v,'^0.1.5-rc.1'))"
+```
+
+`dsh` 主包内**没有** `engines` / `dshhub` 的消费点（全量 grep 无命中），所以这两个字段不参与
+CLI 安装校验，只在 dshhub 目录侧影响兼容性展示与过滤。
+
+**发布凭据**：账号 `yoursc` 开了 2FA（`auth-and-writes`），`npm publish` 会交互式索要 OTP，
+必须在真实 TTY 里跑；若报 403，改用 npmjs.com 生成的 Automation token。
+
+**改名必须同时改三处**，少一处会让 Web 整页起不来（实测踩过）：`package.json` 的 `name`、
+`cordis.patch.yml` 里 insert 的 `name`、以及 `lib/client.js` 里 `__ModuleLoader__.load({ id })` 的
+`id`——client-modules 要求 bundle 用**包名**注册，否则报
+`bundle … loaded without registering "<包名>" via __ModuleLoader__.load`。
+`test/client-harness.mjs` 现在用 `package.json` 断言这个 id，改名后 `npm test` 就能发现。
+
+包名已定为 `@yoursc/dsh-siyuan`（npm 上的裸名 `dsh-siyuan` 已被 `coolgech` 占用）。
+GitHub 地址按 `github.com/yoursc/dsh-siyuan` 填写，与账号不一致时改 `package.json` 里的
+`repository` / `homepage` / `bugs` 三处即可。
+
+## 事件记录（都是真机测试抓出来的）
+
+| 现象 | 根因 | 处理 |
+|---|---|---|
+| Web 整页起不来：`bundle … loaded without registering "@yoursc/dsh-siyuan" via __ModuleLoader__.load` | 改名时漏了第三处——`lib/client.js` 里 `__ModuleLoader__.load({id})` 的 id 仍是旧裸名 | id 改为包名；`test/client-harness.mjs` 改成用 `package.json.name` 断言 |
+| `siyuan_delete_block` 传文档 id 报成功但什么都没删 | 思源 `/api/block/deleteBlock` 对文档块静默 no-op | 新增 `siyuan_remove_doc`（走 `/api/filetree/removeDocByID`）；`delete_block` 先查块类型，遇文档块直接拒绝 |
+| `siyuan_remove_doc` 报「删除未生效」，但文档其实已删 | 思源删除是**异步落库**，返回成功那一刻 `blocks` 行还在 | 删除后用 `waitUntilBlockGone` 复核；替身用 `deleteDelayMs` 复现 |
+| 发布前审计发现 `dsh.engines.dsh: ">=0.1.2-rc.1"` 把 dsh 的 `latest`（`0.1.5-rc.1`）判为不兼容 | semver 仅对「与比较器同元组」的预发布放行；dsh 只发过预发布版 | 两处都改成 `^0.1.5-rc.1`，并在本文件记下「跟进新 rc 线要手工更新」 |
+| 日记路径渲染成 `2126-09-12` | Go layout 顺序替换时 `02` 命中了已替换出的 `2026` | 改成单趟正则替换（`goLayout`） |
+| 设置页保存的改动没生效（如 `danger` 开关） | 页面上的改动必须先点「保存设置」才落盘 | 无需改码，操作上注意 |
+| 取消工具调用后删除仍跑完整个复核 | 信号只在入口检查一次，`sleep` 不可中断 | 信号贯通到请求与退避等待；抛官方 `AbortError` |
+| 往不存在的笔记本写文档"成功" | `assertNotebook` 只看"有没有填"，替身也不校验 notebook | 写入前查 `lsNotebooks` 确认存在且未关闭；替身同步收紧 |
+
+## 环境注意
+
+- 写 `/workspace` 与 `~/.dsh` 都在 dsh 会话的工作区之外，会触发沙箱授权，需要放行。
+- 容器里没有 docker socket，看不到 compose 的 restart policy；**不要**自行 kill dsh 进程
+  （入口脚本 `exec dsh web`，没有重启循环），重启交给用户或 1Panel。
+- 本机现场备忘（思源实例、token 来源、安装状态）在 `docs/handover.md`，已 gitignore，**永不提交**。
