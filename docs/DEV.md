@@ -165,8 +165,8 @@ npm publish                       # publishConfig 已带 registry 与 access:pub
 
 ```bash
 npm test                       # 6 套件全绿
-npm pack --dry-run             # 6 个文件、30.4 kB
-npm view <包名> --registry https://registry.npmjs.org/   # 预期 404（未占用）
+npm pack --dry-run             # 6 个文件：lib/×2 + cordis.patch.yml + npm 自带的 README/LICENSE/package.json
+npm view @yoursc/dsh-siyuan@<新版本> --registry https://registry.npmjs.org/   # 预期 404（该版本未占用）
 ```
 
 **版本策略**：首个公开版是 `0.0.1`（发 `latest`）。版本号语义要跟着**实际验证过的 dsh 版本**走，
