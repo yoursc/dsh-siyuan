@@ -1,6 +1,6 @@
 {
   "name": "@yoursc/dsh-siyuan",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "DeepSeek Harness plugin: SiYuan (思源笔记) integration — host-side siyuan_* tools for search/read/write plus a dedicated settings page in the Web client.",
   "type": "module",
   "main": "lib/index.js",
