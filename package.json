@@ -1,6 +1,6 @@
 {
   "name": "@yoursc/dsh-siyuan",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "DeepSeek Harness plugin: SiYuan (思源笔记) integration — host-side siyuan_* tools for search/read/write plus a dedicated settings page in the Web client.",
   "type": "module",
   "main": "lib/index.js",
@@ -11,11 +11,12 @@
   },
   "files": [
     "lib",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "CHANGELOG.md"
   ],
   "dsh": {
     "engines": {
-      "dsh": "^0.1.5-rc.1"
+      "dsh": ">=0.1.5-rc.1 || >=0.1.6-0 || >=0.1.7-0"
     },
     "bundle": {
       "patch": "./cordis.patch.yml"
@@ -42,12 +43,12 @@
       ]
     },
     "compatibility": {
-      "dsh": "^0.1.5-rc.1",
+      "dsh": ">=0.1.5-rc.1 || >=0.1.6-0 || >=0.1.7-0",
       "node": ">=20"
     }
   },
   "scripts": {
-    "test": "node test/harness.mjs && node test/tools-e2e.mjs && node test/client-harness.mjs && node test/client-navicon.mjs && node test/client-render.mjs && node test/client-interactive.mjs"
+    "test": "node test/harness.mjs && node test/tools-e2e.mjs && node test/decode-body.mjs && node test/client-harness.mjs && node test/client-navicon.mjs && node test/client-render.mjs && node test/client-interactive.mjs"
   },
   "keywords": [
     "dsh",

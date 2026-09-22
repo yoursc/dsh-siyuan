@@ -126,7 +126,7 @@ DSH_HOME=/tmp/sy-probe node /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin
 
 ```bash
 npm install                    # 只有 devDependency：@deepseek-ai/dsh-tools（官方 schema 校验器）
-npm test                       # 6 个套件全绿；自包含，不需要真实思源
+npm test                       # 7 个套件全绿；自包含，不需要真实思源
                                # 断言条数会随开发变化，别在文档里写死（要数字就跑一遍数 "  ok "）
 node test/harness.mjs --live   # 可选：把干跑测试改成探测真实实例 127.0.0.1:6806
 ```
@@ -145,9 +145,13 @@ node test/harness.mjs --live   # 可选：把干跑测试改成探测真实实�
   删除异步落库（`deleteDelayMs`）、`createDocWithMd` 非幂等、`updateBlock` 只保留第一段、
   延时响应（`responseDelayMs`）、SQL 只认已知语句形状（不认识的形状报错而不是返回空数组）。
 - **临时 home 用 `mkdtempSync`**，失败时保留目录便于取证；替身的定时器在 `close()` 里清理。
+- **响应解码用例替换 `globalThis.fetch`**（`test/decode-body.mjs`）：用预制 `Response` 喂真实的
+  `siyuanFetch`，覆盖「压缩体 × `content-encoding` 有/无」的组合与魔数优先分支。不联网，
+  也不需要替身服务；断言的是解码后的 `data`、请求头与报错文案，不是内部函数返回值。
 
 补一条断言时的自检：**先把修复摘掉，确认它会失败**。本仓库里 H1（日期翻滚）、H2（损坏配置）、
-H5（删除复核窗口）、H6（多段丢弃）、B1（请求中取消）、B3（工具计数）都是这么验证过的；
+H5（删除复核窗口）、H6（多段丢弃）、B1（请求中取消）、B3（工具计数）、D1（响应解码，摘掉补丁
+12 项变红）都是这么验证过的；
 其中 B1 的第一版断言其实测不出修复（新旧实现都会抛 `AbortError`），是靠"摘掉修复看是否变红"
 才发现并补强的。
 
@@ -158,29 +162,34 @@ npm version <patch|minor|0.0.x>   # 见下「版本策略」
 npm publish                       # publishConfig 已带 registry 与 access:public，无需再加参数
 ```
 
-`npm pack --dry-run` 的清单应只含 `lib/` + `cordis.patch.yml`（README/LICENSE 由 npm 自带）。
-`files` 不含 `test/`：发布包里没有测试，属正常取舍。
+`npm pack --dry-run` 的清单应只含 `lib/` + `cordis.patch.yml` + `CHANGELOG.md`
+（README/LICENSE/package.json 由 npm 自带）。`files` 不含 `test/`：发布包里没有测试，属正常取舍。
+
+**`lib/` 里不要留 `*.bak-*` 备份**：`files` 是白名单，白名单目录内的文件**不能**用 `.npmignore`
+排除，备份会被原样打进包里（实测清单里多出一个 68 kB 的 `lib/index.js.bak-*`）。备份放到
+`lib/` 之外，或直接删掉（打补丁前的版本在 git HEAD 里，`git show HEAD:lib/index.js` 可取回）。
 
 **发布前必查**（本机全局 registry 是 npmmirror 镜像源，不能发布，靠 `publishConfig` 兜住）：
 
 ```bash
-npm test                       # 6 套件全绿
-npm pack --dry-run             # 6 个文件：lib/×2 + cordis.patch.yml + npm 自带的 README/LICENSE/package.json
+npm test                       # 7 套件全绿
+npm pack --dry-run             # 7 个文件：lib/×2 + cordis.patch.yml + CHANGELOG.md + npm 自带的 README/LICENSE/package.json
 npm view @yoursc/dsh-siyuan@<新版本> --registry https://registry.npmjs.org/   # 预期 404（该版本未占用）
 ```
 
 **版本策略**：首个公开版是 `0.0.1`（发 `latest`）。版本号语义要跟着**实际验证过的 dsh 版本**走，
-而不是跟着本体版本号：本插件的 `dsh.engines.dsh` 与 `dshhub.compatibility.dsh` 都声明
-`^0.1.5-rc.1`，理由见下条。
+而不是跟着本体版本号：本插件的 `dsh.engines.dsh` 与 `dshhub.compatibility.dsh` 两处声明同一个
+范围，0.0.3 起为 `>=0.1.5-rc.1 || >=0.1.6-0 || >=0.1.7-0`，理由见下条。
 
-**兼容范围为什么必须带 `-rc.N` 且精确到小版本**：semver 只在「比较器里的预发布元组与候选版本
-的元组相同」时才对预发布放行。因此 `>=0.1.2-rc.1` 会把 **`0.1.5-rc.1` / `0.1.5-rc.2` 全判为
-不兼容**（这正是 dsh 的 `latest` 与 `next`），而 `>=0.1.2-rc.1 <0.2.0` 也救不了——上界不改变该
-规则。想匹配 `0.1.5-rc.*`，范围里就必须出现 `0.1.5-rc.1` 这个元组。dsh 至今**只发布过预发布
-版本**，所以每跟进一条新的 rc 线，这个范围都要手工更新。改完用 npm 自带 semver 复核：
+**兼容范围为什么必须按 rc 线逐条枚举**：semver 只在「比较器里的预发布元组与候选版本的元组
+相同」时才对预发布放行。因此 `^0.1.5-rc.1` 会把 `0.1.6-*` / `0.1.7-*` 判为不兼容；换成
+`>=0.1.5-rc.1` **也救不了**——下界元组是 0.1.5，实测两者对 dsh 已发布的版本判定完全相同，
+加 `<0.2.0` 上界同样不改变该规则。想让某条 rc 线通过，范围里就必须出现**它自己的元组**，
+所以按已知 rc 线逐条 `||` 枚举。dsh 至今**只发布过预发布版本**，每跟进一条新 rc 线都要手工
+加一段。改完用 npm 自带 semver 复核（先 `npm view @deepseek-ai/dsh versions` 看有哪些版本）：
 
 ```bash
-node -e "const s=require('/usr/local/lib/node_modules/npm/node_modules/semver');for(const v of ['0.1.5-rc.1','0.1.5-rc.2','0.1.5','0.2.0'])console.log(v,s.satisfies(v,'^0.1.5-rc.1'))"
+node -e "const s=require('/usr/local/lib/node_modules/npm/node_modules/semver');const r='>=0.1.5-rc.1 || >=0.1.6-0 || >=0.1.7-0';for(const v of ['0.1.5-rc.1','0.1.5-rc.3','0.1.6-alpha.1','0.1.7-alpha.1','0.1.7','0.2.0-alpha.1'])console.log(v,s.satisfies(v,r))"
 ```
 
 `dsh` 主包内**没有** `engines` / `dshhub` 的消费点（全量 grep 无命中），所以这两个字段不参与
@@ -207,6 +216,8 @@ GitHub 地址按 `github.com/yoursc/dsh-siyuan` 填写，与账号不一致时�
 | `siyuan_delete_block` 传文档 id 报成功但什么都没删 | 思源 `/api/block/deleteBlock` 对文档块静默 no-op | 新增 `siyuan_remove_doc`（走 `/api/filetree/removeDocByID`）；`delete_block` 先查块类型，遇文档块直接拒绝 |
 | `siyuan_remove_doc` 报「删除未生效」，但文档其实已删 | 思源删除是**异步落库**，返回成功那一刻 `blocks` 行还在 | 删除后用 `waitUntilBlockGone` 复核；替身用 `deleteDelayMs` 复现 |
 | 发布前审计发现 `dsh.engines.dsh: ">=0.1.2-rc.1"` 把 dsh 的 `latest`（`0.1.5-rc.1`）判为不兼容 | semver 仅对「与比较器同元组」的预发布放行；dsh 只发过预发布版 | 两处都改成 `^0.1.5-rc.1`，并在本文件记下「跟进新 rc 线要手工更新」 |
+| DSH 0.1.7-alpha.1 上插件 `reachable: false`、17 个工具全不可用，报「返回了非 JSON 响应（HTTP 200）」 | 该版内置 undici 8.10.2 → 8.11.0：经全局代理 dispatcher（`EnvHttpProxyAgent`）的响应不再自动解压，且 `content-encoding` 变成 `null`（body 仍是 gzip）。两版 `dsh-http-proxy/lib/index.js` 逐字节相同（sha256 前 16 `5310861bc89788ea`），裸 fetch 不走 dispatcher 时正常 | `siyuanFetch` 改自适应解码（魔数优先、头只兜 br、解压失败退回原文）+ 请求显式带 `Accept-Encoding: gzip`；JSON 报错带 `content-encoding` 与前 8 字节 hex；新增 `test/decode-body.mjs`（摘掉补丁 12 项变红）。同源问题也出现在 `dsh-cost-meter`（OpenRouter 价格刷新），不属本项目 |
+| `^0.1.5-rc.1` 在 dshhub 目录侧把 `0.1.6-*` / `0.1.7-*` 判为不兼容；换成 `>=0.1.5-rc.1` 实测**判定完全相同**、照样不兼容 | semver 只对「与比较器同元组」的预发布放行，下界元组是 0.1.5，救不了 0.1.6/0.1.7；加 `<0.2.0` 上界也不改变该规则 | 0.0.3 起两处都改成按 rc 线枚举 `>=0.1.5-rc.1 \|\| >=0.1.6-0 \|\| >=0.1.7-0`（`dsh` 主包不消费这两个字段，只影响目录侧展示与过滤） |
 | 日记路径渲染成 `2126-09-12` | Go layout 顺序替换时 `02` 命中了已替换出的 `2026` | 改成单趟正则替换（`goLayout`） |
 | 设置页保存的改动没生效（如 `danger` 开关） | 页面上的改动必须先点**那张卡自己的**保存按钮才落盘 | 无需改码，操作上注意 |
 | 取消工具调用后删除仍跑完整个复核 | 信号只在入口检查一次，`sleep` 不可中断 | 信号贯通到请求与退避等待；抛官方 `AbortError` |

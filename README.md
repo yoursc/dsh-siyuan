@@ -15,6 +15,7 @@
 ![思源笔记设置页：连接、API token、默认笔记本、工具开关](assets/settings-overview.png)
 
 > 想改这个插件、或了解它是怎么实现的，请读 [`docs/DEV.md`](docs/DEV.md)。
+> 各版本改了什么见 [`CHANGELOG.md`](CHANGELOG.md)。
 
 ## 安装
 
@@ -32,6 +33,11 @@ docker restart <container>
 插件是在 profile 组合树装载时注册的，新增/删除插件条目后重启是必需的。
 **从 0.0.x 升级到带逐工具开关的版本也要重启一次**（宿主侧的配置形状变了），
 之后改设置页里的任何内容都只用刷新页面。
+
+**DSH 0.1.7 用户请用 0.0.3 及以上**：0.1.7-alpha.1 起宿主内置的 undici 升级后，经代理
+dispatcher 的响应不再自动解压（`content-encoding` 还会被丢掉），0.0.2 会因此报
+「返回了非 JSON 响应（HTTP 200）」、所有工具都不可用；0.0.3 起改成自适应解码，新旧宿主
+都能正常工作。
 
 ## 配置
 
