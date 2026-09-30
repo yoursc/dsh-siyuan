@@ -78,6 +78,7 @@ const { exportsObject } = await loadClientModule(() => ({
   useState: (initial) => renderingRuntime.hooks.useState(initial),
   useCallback: (fn) => renderingRuntime.hooks.useCallback(fn),
   useEffect: (fn) => renderingRuntime.hooks.useEffect(fn),
+  useRef: (initial) => renderingRuntime.hooks.useRef(initial),
 }))
 
 let registered = null

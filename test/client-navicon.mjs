@@ -180,6 +180,7 @@ const { exportsObject, bundleId } = await loadClientModule(() => ({
 	useState: (value) => [typeof value === 'function' ? value() : value, () => {}],
 	useEffect: () => {},
 	useCallback: (fn) => fn,
+	useRef: (value) => ({ current: value }),
 }))
 const internals = exportsObject.internals
 

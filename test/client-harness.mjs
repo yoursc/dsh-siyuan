@@ -45,6 +45,7 @@ const reactStub = {
   useState: (value) => [typeof value === 'function' ? value() : value, () => {}],
   useEffect: () => {},
   useCallback: (fn) => fn,
+  useRef: (value) => ({ current: value }),
 }
 const warnings = []
 const exportsObject = captured.factory((name) => {

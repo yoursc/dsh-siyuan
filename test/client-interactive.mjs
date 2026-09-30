@@ -9,7 +9,7 @@
  */
 
 import fs from 'node:fs'
-import { buildHostState, createHooks, findButton, findSwitch, flattenText, loadClientModule, renderOnce, switches } from './client-harness-lib.mjs'
+import { buildHostState, cardOf, createHooks, findButton, findSwitch, flattenText, loadClientModule, renderOnce, switches } from './client-harness-lib.mjs'
 
 const failures = []
 function check(label, condition, detail) {
@@ -45,6 +45,7 @@ const { exportsObject } = await loadClientModule(() => ({
   useState: (initial) => renderingRuntime.hooks.useState(initial),
   useCallback: (fn) => renderingRuntime.hooks.useCallback(fn),
   useEffect: (fn) => renderingRuntime.hooks.useEffect(fn),
+  useRef: (initial) => renderingRuntime.hooks.useRef(initial),
 }))
 let registered = null
 exportsObject.apply({
@@ -67,14 +68,17 @@ let stateForFetch = stateForClient
  * `overrides[method]` 支持：`{ok:false,message}`（宿主错误信封）、`{rawText}`、`{value}`、
  * `{httpStatus}`；`network` 直接网络失败；`timeout` 抛 TimeoutError（模拟 AbortSignal 超时）。
  * 每个调用记录 body 与 hasSignal（api() 必须给 fetch 挂超时信号）。
+ *
+ * `hang`：该路由永不返回，用来观察"请求进行中"时的界面。
+ * `hold`：**先按正常路径算出此刻宿主会回的响应，再把传输挂起**，由用例显式
+ *   `stub.held[i].release()` 放行。响应内容在请求到达时就定好了，所以放行顺序独立于
+ *   到达顺序——这正是真实情况（宿主每次保存都要跑一遍可达性探测，慢的那次可能后到），
+ *   用来断言"同一张卡的旧响应后到时不得覆盖新状态"。
  */
-function createFetchStub({ overrides = {}, network = false, timeout = false, hang = [] } = {}) {
+function createFetchStub({ overrides = {}, network = false, timeout = false, hang = [], hold = [] } = {}) {
   const calls = []
-  const stub = async (url, init) => {
-    const method = String(url).replace('/siyuan/api/', '')
-    calls.push({ method, body: init?.body === undefined ? undefined : JSON.parse(init.body), hasSignal: init?.signal instanceof AbortSignal })
-    // `hang`：让某个路由永不 resolve，用来观察"请求进行中"时的界面（各卡是否互相锁死）。
-    if (hang.includes(method)) return new Promise(() => {})
+  const held = []
+  const respond = async (method, init) => {
     if (network) throw new TypeError('fetch failed')
     if (timeout) {
       const timeoutError = new Error('The operation was aborted due to timeout')
@@ -116,7 +120,18 @@ function createFetchStub({ overrides = {}, network = false, timeout = false, han
     }
     return Response.json({ ok: true, value: null })
   }
-  return { stub, calls }
+  const stub = async (url, init) => {
+    const method = String(url).replace('/siyuan/api/', '')
+    const body = init?.body === undefined ? undefined : JSON.parse(init.body)
+    calls.push({ method, body, hasSignal: init?.signal instanceof AbortSignal })
+    if (hang.includes(method)) return new Promise(() => {})
+    if (hold.includes(method)) {
+      const response = await respond(method, init)
+      return new Promise((resolve) => held.push({ method, body, release: () => resolve(response) }))
+    }
+    return respond(method, init)
+  }
+  return { stub, calls, held }
 }
 
 // ── 渲染辅助 ───────────────────────────────────────────────────────────────
@@ -140,6 +155,23 @@ const button = (label) => {
   const hit = findButton(elementsOf(), label)
   if (hit === undefined) throw new Error(`找不到按钮：${label}`)
   return hit
+}
+/**
+ * 某张卡的**全部**文本（含卡内消息）。
+ * 反馈"落在哪张卡"是这套件原先没覆盖的约定：messages() 把所有卡的 .dsy-msg 拍平成一条
+ * 字符串、不带归属，所以"保存笔记本的消息跑到连接卡"这种错位没有任何断言能发现。
+ */
+const cardText = (title) => {
+  const card = cardOf(elementsOf(), title)
+  if (card === undefined) throw new Error(`找不到卡片：${title}`)
+  return flattenText([card])
+}
+/** 拨动一个工具开关的行（整行可点，需要 currentTarget 才能过拖选保护）。 */
+const flipRow = (label) => {
+  const row = findSwitch(elementsOf(), label)
+  if (row === undefined) throw new Error(`找不到开关行：${label}`)
+  row.props.onClick({ currentTarget: row })
+  return row
 }
 const inputOf = (id) => elementsOf().find((element) => element.type === 'input' && element.props.id === id)
 const selectOf = () => elementsOf().find((element) => element.type === 'select')
@@ -185,6 +217,17 @@ console.log('— 加载路径 —')
   check('初始计数来自宿主 enabled（8/17）', /已启用 8 \/ 共 17 个/.test(loaded), loaded.slice(-200))
   check('加载成功不显示错误', messages() === '', messages())
   check('干净状态下提示已保存', /所有改动都已保存/.test(loaded), loaded.slice(-120))
+}
+/**
+ * 只排干异步链，**不重跑 effect**。
+ *
+ * 竞态用例里必须用它、不能用 settle()：替身的 useEffect 不看依赖数组，每次 flushEffects 都会
+ * 重跑挂载 effect，于是又发一次 getState，把"还没返回的写入"提前同步进页面——dirty 被悄悄
+ * 抹平、按钮因为"没有改动"而禁用，正好把"锁被顶掉"这个缺陷掩盖掉。
+ * 断言自己每次都重新渲染（elementsOf() → render()），所以这里不必额外重绘。
+ */
+async function drain() {
+  for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setImmediate(resolve))
 }
 
 console.log('— 错误态 —')
@@ -420,6 +463,99 @@ console.log('— 各卡互不锁定 —')
   check('别的卡不受影响（工具开关仍可点）', findSwitch(elementsOf(), 'siyuan_search').props['aria-disabled'] !== true && findSwitch(elementsOf(), 'siyuan_search').props.tabIndex === 0, JSON.stringify({ disabled: findSwitch(elementsOf(), 'siyuan_search').props['aria-disabled'], tabIndex: findSwitch(elementsOf(), 'siyuan_search').props.tabIndex }))
   check('别的卡不受影响（测试连接仍可点）', button('测试连接').props.disabled === false)
   check('「重新读取」在有任何请求时都禁用（它会整体重载）', button('重新读取').props.disabled === true)
+}
+
+console.log('— 并发：一张卡在飞时，别的卡开始请求不得把它顶成空闲 —')
+{
+  // 2026-09-28 评审 F1：pending 曾是单值，B 卡一开始就把 A 卡的 busy 顶掉，B 一完成又把
+  // A 的锁清空——A 的请求还在飞，卡片却已经显示空闲，用户可以重复提交。
+  // 退回单值后，下面「本卡按钮仍在锁」与「测试连接完成后仍在锁」两条会红。
+  const stub = startCase({ hold: ['updateConfig', 'testConnection'] })
+  await mount()
+  flipRow('全文检索') // 拨一个开关，让「保存开关」可用（请求被挂起 → dirty 一直为真）
+  button('保存开关').props.onClick() // 不 await：updateConfig 被 hold
+  await drain()
+  check('保存开关在飞：本卡按钮锁定', button('保存开关').props.disabled === true)
+  check('保存开关在飞：本卡整行 aria-disabled', findSwitch(elementsOf(), '全文检索').props['aria-disabled'] === true)
+
+  button('测试连接').props.onClick() // 另一张卡开始请求
+  await drain()
+  check('另一张卡开始请求后：本卡按钮仍在锁', button('保存开关').props.disabled === true, `disabled=${String(button('保存开关').props.disabled)}`)
+  check('另一张卡开始请求后：本卡整行仍在锁', findSwitch(elementsOf(), '全文检索').props['aria-disabled'] === true)
+  check('两卡同时在飞：「重新读取」仍禁用', button('重新读取').props.disabled === true)
+
+  stub.held[1].release() // 先放行「测试连接」
+  await drain()
+  check('测试连接完成后：本卡仍在锁（它自己的请求还没回来）', button('保存开关').props.disabled === true, `disabled=${String(button('保存开关').props.disabled)}`)
+
+  stub.held[0].release() // 再放行「保存开关」
+  await drain()
+  check('自己的请求回来后开关状态落定（全文检索已关）', findSwitch(elementsOf(), '全文检索').props['aria-checked'] === false, `aria-checked=${String(findSwitch(elementsOf(), '全文检索').props['aria-checked'])}`)
+  check('自己的请求回来后计数已扣除', /已启用 7 \/ 共 17 个/.test(textOf()), textOf().slice(-160))
+  check('自己的请求回来后回到"都已保存"', /所有改动都已保存/.test(textOf()), textOf().slice(-120))
+}
+
+console.log('— 并发：同一张卡的旧响应后到，不得覆盖新状态 —')
+{
+  // F1 的另一半：pending 改集合只解掉"提前解锁"，还要一张请求票据挡住乱序覆盖。
+  // 注意这是**防御性**用例：pending 修好之后，同一张卡的输入在保存期间是 disabled，用户点不出
+  // 第二次保存（下面的 onChange 直接驱动 handler、绕过 disabled）。一旦以后有人给某张卡加了
+  // "保存中仍可改"的交互，这条就是那道闸的守门人。
+  const stub = startCase({ hold: ['updateConfig'] })
+  await mount()
+  inputOf('dsy-base-url').props.onChange({ target: { value: 'http://10.0.0.1:6806' } })
+  button('保存地址').props.onClick() // 保存 #1（携带 10.0.0.1）
+  await drain()
+  inputOf('dsy-base-url').props.onChange({ target: { value: 'http://10.0.0.2:6806' } })
+  button('保存地址').props.onClick() // 保存 #2（携带 10.0.0.2）
+  await drain()
+  check('两次保存都已发出', stub.held.length === 2, `held=${stub.held.length}`)
+
+  stub.held[1].release() // #2 先到（宿主此刻也是 10.0.0.2）
+  await drain()
+  check('#2 的响应落地为 10.0.0.2', inputOf('dsy-base-url').props.value === 'http://10.0.0.2:6806', String(inputOf('dsy-base-url').props.value))
+
+  stub.held[0].release() // #1 迟到（它携带的是 10.0.0.1）
+  await drain()
+  check('迟到的 #1 响应被丢弃：页面仍是 10.0.0.2', inputOf('dsy-base-url').props.value === 'http://10.0.0.2:6806', String(inputOf('dsy-base-url').props.value))
+  check('丢弃后页面与宿主一致（仍显示已保存，而不是被拽回脏状态）', /所有改动都已保存/.test(textOf()), textOf().slice(-120))
+}
+
+console.log('— applyState 按卡对齐：保存 token 不动别的卡草稿 —')
+{
+  // 2026-09-28 评审 T2：把 applyState 改成无条件整份重置（注释里警告过的那种），
+  // 旧套件全绿——token 卡那条 return current 兜底从来没有用例。
+  const stub = startCase()
+  await mount()
+  inputOf('dsy-base-url').props.onChange({ target: { value: 'http://127.0.0.1:9999' } })
+  inputOf('dsy-token').props.onChange({ target: { value: 'new-token' } })
+  flipRow('全文检索')
+  check('两处改动都处于未保存状态', /有未保存的改动/.test(textOf()), textOf().slice(-120))
+  await button('保存 token').props.onClick()
+  check('保存 token 调用 setToken', callsOf(stub, 'setToken').length === 1, JSON.stringify(stub.calls.map((call) => call.method)))
+  check('保存 token 后地址草稿仍在', inputOf('dsy-base-url').props.value === 'http://127.0.0.1:9999', String(inputOf('dsy-base-url').props.value))
+  check('保存 token 后工具草稿仍在', findSwitch(elementsOf(), '全文检索').props['aria-checked'] === false)
+  check('保存 token 后连接卡仍是脏的', /有未保存的改动/.test(textOf()), textOf().slice(-120))
+  check('保存 token 后连接卡的「保存地址」仍可用', button('保存地址').props.disabled === false)
+  check('token 消息落在 token 卡', cardText('API token').includes('token 已存入宿主凭据库。'), cardText('API token').slice(0, 120))
+  check('token 输入框保存后清空', inputOf('dsy-token').props.value === '', JSON.stringify(inputOf('dsy-token').props.value))
+}
+
+console.log('— 锁与反馈都落在本卡 —')
+{
+  // 2026-09-28 评审 T3：把「保存笔记本」锁到 connection 卡、或把它的消息写到 connection 卡，
+  // 旧套件都发现不了（messages() 不带卡归属）。
+  const stub = startCase({ hold: ['updateConfig'] })
+  await mount()
+  selectOf().props.onChange({ target: { value: 'nb-a' } })
+  button('保存笔记本').props.onClick()
+  await drain()
+  check('保存笔记本在飞：笔记本卡锁定', button('保存笔记本').props.disabled === true)
+  check('保存笔记本在飞：连接卡不锁（各卡互不锁定）', button('测试连接').props.disabled === false)
+  stub.held[0].release()
+  await drain()
+  check('成功文案落在默认笔记本卡', cardText('默认笔记本').includes('默认笔记本已保存。'), cardText('默认笔记本').slice(0, 120))
+  check('连接卡没有收到这条消息', !cardText('连接').includes('已保存'), cardText('连接').slice(0, 120))
 }
 
 console.log('')

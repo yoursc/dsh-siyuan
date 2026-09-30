@@ -100,6 +100,7 @@ export async function loadClientModule(makeReact) {
 export function createHooks({ disableEffects = false } = {}) {
   const states = []
   const setters = []
+  const refs = []
   const effects = []
   const pendingEffects = []
   let cursor = 0
@@ -120,6 +121,13 @@ export function createHooks({ disableEffects = false } = {}) {
     useCallback(fn) {
       cursor += 1 // 占一个 hook 槽位，保持与真实 React 的顺序一致
       return fn
+    },
+    // useRef 与真实 React 一样跨渲染保持同一个对象、且改动不触发重渲。
+    // 存进单独的 refs 数组，不与 useState 的槽位混用。
+    useRef(initial) {
+      const index = cursor++
+      if (!(index in refs)) refs[index] = { current: initial }
+      return refs[index]
     },
     useEffect(fn) {
       cursor += 1
