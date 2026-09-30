@@ -249,7 +249,10 @@ console.log('— 只读来源的 token（env）—')
   const roText = flattenText(roElements)
   check('env 来源写成「来自环境变量」', cardHeaderText(roElements, 'API token') === 'API token | token 已配置 · 来自环境变量 · 页面不可改', cardHeaderText(roElements, 'API token'))
   check('给出"去掉环境变量后重启"的下一步', /去掉 dsh web 的 SIYUAN_TOKEN 环境变量后重启/.test(roText), roText.slice(-200))
-  check('只读时输入框与按钮禁用', roElements.some((element) => element.type === 'input' && element.props.id === 'dsy-token' && element.props.disabled === true) && findButton(roElements, '保存 token').props.disabled === true)
+  check('只读时输入框与保存/清除禁用', roElements.some((element) => element.type === 'input' && element.props.id === 'dsy-token' && element.props.disabled === true) && findButton(roElements, '保存 token').props.disabled === true && findButton(roElements, '清除').props.disabled === true)
+  // 「测试 token」故意不跟着置灰：token 来自环境变量时，用户恰恰需要知道它还有效没有。
+  check('只读时「测试 token」**仍可用**（env 来的 token 也要能测）', findButton(roElements, '测试 token')?.props.disabled === false)
+  check('只读时明说测试仍可用', /「测试 token」仍然可用/.test(roText), roText.slice(-300))
 }
 
 console.log('— 旧宿主（没重启）时的降级 —')

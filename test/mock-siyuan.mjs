@@ -308,7 +308,9 @@ export async function startMockSiYuan({ token = 'test-token', deleteDelayMs = 0,
       }
       const pathname = new URL(request.url ?? '/', 'http://mock.invalid').pathname
       const authorized = request.headers.authorization === `Token ${token}`
-      state.requests.push({ path: pathname, payload, authorized, rawBody: raw })
+      // hasAuthHeader 与 authorized 分开记：`authorized` 只说明"值对不对"，
+      // 而"这次请求到底带没带 Authorization 头"是另一回事（设置页的地址测试要断言它）。
+      state.requests.push({ path: pathname, payload, authorized, hasAuthHeader: request.headers.authorization !== undefined, rawBody: raw })
 
       const reply = (code, msg, data) => {
         response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })

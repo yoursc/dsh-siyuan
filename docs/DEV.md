@@ -27,11 +27,21 @@
   默认值只能在这里兜底：`normalizeConfig` 是纯函数、不看工具清单，补默认值会补错组。
 - **设置页的交互契约**：四张卡（连接 / API token / 默认笔记本 / 工具开关）**各自保存**，
   每张卡只提交自己的字段（`updateConfig` 本来就接受部分字段），各自持有 pending 与消息，
-  互不锁定；脏值 = 草稿 vs 宿主快照的现算。`testConnection` / `listNotebooks` 接受
+  互不锁定；脏值 = 草稿 vs 宿主快照的现算。`testConnection` / `listNotebooks` / `testToken` 接受
   `body.baseUrl` / `body.token`，**优先用页面正在编辑的草稿**（否则"改了地址没保存就点测试"
   测的是旧地址）；非法草稿地址与保存共用 `normalizeBaseUrlInput` 一套判据。打开页面时还会在
   `state.reachable === true` 下**静默**拉一次笔记本列表（失败不写消息，用户没点那个按钮）；
   列表没回来时下拉显示已保存 id 并标注"已保存"，**不能**提前断言"不在当前列表中"。
+- **两个测试按钮各管一件事，判定不许掺对方**（见事件记录里那条"误报地址错"）：
+  - `testConnection` = **只测地址**：不发 Authorization 头（body 里的 `token` 一律忽略），
+    打公开接口 `/api/system/version`，出**三态** `verdict`：`ok`（拿到 code 0，顺带版本号）/
+    `auth`（拿到思源信封但 code≠0 —— 地址是活的，只是要 token）/ `fail`（连不上、非 JSON、
+    不是思源）。`ok` 字段保留给还没重启 dsh web 的旧客户端（= verdict 为 ok）。
+  - `testToken` = 只测鉴权：草稿 token 优先，打 `lsNotebooks`（**不用 SQL**：发布模式下 SQL
+    被禁，会把"开了发布模式"误报成"token 不对"），出 `kind`：`ok`/`auth`（被拒）/
+    `unreachable`（连不上，**说"未被验证"而不是"token 不对"**）/`error`/`empty`。
+  - `testToken` **纯只读**（不写配置、不写凭据），且**不作为保存的门禁**：测不过照样能存。
+    设置页上唯一与 `writable` 无关的按钮就是「测试 token」——env 来的 token 恰恰最需要反馈。
 - **凭据**：token 存宿主凭据库的 `SIYUAN_TOKEN`，页面只报告状态（徽标文案如
   `token 已配置 · 来自环境变量 · 页面不可改`），永不回显值。徽标住在 **API token 卡**，
   不要跟"可达"挤在连接卡标题行——那样会被读成"这个连接只读"。
@@ -64,8 +74,8 @@
 | `lib/index.js` | 宿主半场 |
 | `lib/client.js` | 客户端 bundle（`window.__ModuleLoader__.load`，无构建步骤） |
 | `cordis.patch.yml` | 发布用 `dsh.bundle.patch` 层（`dsh plugin add` 通道） |
-| `test/harness.mjs` | 假 ctx 调 `apply()`：工具 schema、逐工具开关的动态注册/释放、旧配置迁移、设置页路由（围栏、请求体、草稿探测、凭据路径）、卸载路径 |
-| `test/mock-siyuan.mjs` | 思源 API 本地替身（鉴权、`code` 信封、非幂等 create、异步落库、延时响应） |
+| `test/harness.mjs` | 假 ctx 调 `apply()`：工具 schema、逐工具开关的动态注册/释放、旧配置迁移、设置页路由（围栏、请求体、草稿探测、地址三态、token 测试只读且不阻断保存、凭据路径）、卸载路径 |
+| `test/mock-siyuan.mjs` | 思源 API 本地替身（鉴权——`/api/system/version` 与 `bootProgress` 免鉴权、`code` 信封、非幂等 create、异步落库、延时响应；逐请求记 `hasAuthHeader`） |
 | `test/tools-e2e.mjs` | 对着替身跑通全部 17 个工具与错误面（含取消、删除复核窗口、笔记本校验） |
 | `test/client-harness.mjs` | 客户端 bundle 加载与 `settings.section` 槽位契约 |
 | `test/client-navicon.mjs` | 导航图标兜底：DOM 替身驱动「面板挂载 → 换掉齿轮」，含幂等/不误伤/卸载 |
@@ -220,6 +230,7 @@ GitHub 地址按 `github.com/yoursc/dsh-siyuan` 填写，与账号不一致时�
 | `^0.1.5-rc.1` 在 dshhub 目录侧把 `0.1.6-*` / `0.1.7-*` 判为不兼容；换成 `>=0.1.5-rc.1` 实测**判定完全相同**、照样不兼容 | semver 只对「与比较器同元组」的预发布放行，下界元组是 0.1.5，救不了 0.1.6/0.1.7；加 `<0.2.0` 上界也不改变该规则 | 0.0.3 起两处都改成按 rc 线枚举 `>=0.1.5-rc.1 \|\| >=0.1.6-0 \|\| >=0.1.7-0`（`dsh` 主包不消费这两个字段，只影响目录侧展示与过滤） |
 | 日记路径渲染成 `2126-09-12` | Go layout 顺序替换时 `02` 命中了已替换出的 `2026` | 改成单趟正则替换（`goLayout`） |
 | 设置页保存的改动没生效（如 `danger` 开关） | 页面上的改动必须先点**那张卡自己的**保存按钮才落盘 | 无需改码，操作上注意 |
+| 没配 token 时点地址下面的「测试连接」报红，用户以为地址填错了 | 它其实是"三条探测全过才算成功"：没 token 时两条鉴权探测必然失败，红字落在**地址**卡里。可下方探明细里版本号明明读得到——地址是通的 | 拆成两个按钮：「测试地址」不带 token，只对地址下结论（`ok`/`auth`/`fail` 三态，`auth` 用琥珀色而不是红色）；「测试 token」测鉴权且**测不过也允许保存**。`siyuanFetch` 拆出 `sendSiyuanRequest`，让地址探测能自己分辨"连不上"与"被拒绝"（`SiYuanError.kind`） |
 | 取消工具调用后删除仍跑完整个复核 | 信号只在入口检查一次，`sleep` 不可中断 | 信号贯通到请求与退避等待；抛官方 `AbortError` |
 | 往不存在的笔记本写文档"成功" | `assertNotebook` 只看"有没有填"，替身也不校验 notebook | 写入前查 `lsNotebooks` 确认存在且未关闭；替身同步收紧 |
 

@@ -116,7 +116,11 @@ function createFetchStub({ overrides = {}, network = false, timeout = false, han
       return Response.json({ ok: true, value: { baseUrl: 'http://127.0.0.1:6806', notebooks: [{ id: 'nb-a', name: '收件箱', closed: false }] } })
     }
     if (method === 'testConnection') {
-      return Response.json({ ok: true, value: { ok: false, version: '', baseUrl: 'http://127.0.0.1:6806', tokenConfigured: false, tokenSource: '', probes: [{ label: '系统版本 /api/system/version', ok: false, detail: '思源接口失败：code=-1 msg=Auth failed' }] } })
+      // 宿主新版契约：只测地址，三态判定（ok / auth / fail），只发一条不带 token 的探测。
+      return Response.json({ ok: true, value: { ok: false, verdict: 'fail', version: '', baseUrl: 'http://127.0.0.1:6806', detail: '连接思源失败（http://127.0.0.1:6806/api/system/version）：fetch failed', probes: [{ label: '系统版本 /api/system/version（不带 token，只测地址）', ok: false, detail: '连接思源失败：fetch failed' }] } })
+    }
+    if (method === 'testToken') {
+      return Response.json({ ok: true, value: { ok: true, kind: 'ok', baseUrl: 'http://127.0.0.1:6806', tokenConfigured: true, tokenSource: 'draft', usedDraft: true, detail: '思源接受了鉴权，列出了 1 个笔记本。' } })
     }
     return Response.json({ ok: true, value: null })
   }
@@ -150,6 +154,16 @@ const messages = () =>
   elementsOf()
     .filter((element) => typeof element.props?.className === 'string' && element.props.className.startsWith('dsy-msg'))
     .map((element) => flattenText([element]))
+    .join(' || ')
+/**
+ * 卡内消息的 className（`.dsy-msg ok|err|warn`）。
+ * 光断言文案不够：这次改动的要害就是"颜色不能骗人"——文案说地址可达、颜色却染红，
+ * 用户读到的仍然是"红色 = 出错了"。所以颜色单独有断言。
+ */
+const messageKinds = () =>
+  elementsOf()
+    .filter((element) => typeof element.props?.className === 'string' && element.props.className.startsWith('dsy-msg'))
+    .map((element) => element.props.className)
     .join(' || ')
 const button = (label) => {
   const hit = findButton(elementsOf(), label)
@@ -197,6 +211,17 @@ async function settle() {
   renderOnce(Section, {}, runtime)
   await runtime.flushEffects()
 }
+/**
+ * 只排干异步链，**不重跑 effect**。
+ *
+ * 竞态用例里必须用它、不能用 settle()：替身的 useEffect 不看依赖数组，每次 flushEffects 都会
+ * 重跑挂载 effect，于是又发一次 getState，把"还没返回的写入"提前同步进页面——dirty 被悄悄
+ * 抹平、按钮因为"没有改动"而禁用，正好把"锁被顶掉"这个缺陷掩盖掉。
+ * 断言自己每次都重新渲染（elementsOf() → render()），所以这里不必额外重绘。
+ */
+async function drain() {
+  for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setImmediate(resolve))
+}
 
 // ── 加载路径 ───────────────────────────────────────────────────────────────
 
@@ -217,17 +242,6 @@ console.log('— 加载路径 —')
   check('初始计数来自宿主 enabled（8/17）', /已启用 8 \/ 共 17 个/.test(loaded), loaded.slice(-200))
   check('加载成功不显示错误', messages() === '', messages())
   check('干净状态下提示已保存', /所有改动都已保存/.test(loaded), loaded.slice(-120))
-}
-/**
- * 只排干异步链，**不重跑 effect**。
- *
- * 竞态用例里必须用它、不能用 settle()：替身的 useEffect 不看依赖数组，每次 flushEffects 都会
- * 重跑挂载 effect，于是又发一次 getState，把"还没返回的写入"提前同步进页面——dirty 被悄悄
- * 抹平、按钮因为"没有改动"而禁用，正好把"锁被顶掉"这个缺陷掩盖掉。
- * 断言自己每次都重新渲染（elementsOf() → render()），所以这里不必额外重绘。
- */
-async function drain() {
-  for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setImmediate(resolve))
 }
 
 console.log('— 错误态 —')
@@ -289,25 +303,44 @@ console.log('— 连接卡：保存地址（只提交本卡字段）—')
   check('保存失败显示「保存地址失败：」+ 宿主原因', /保存地址失败：baseUrl 不是合法的 http/.test(messages()), messages())
 }
 
-console.log('— 连接卡：测试连接用草稿（不必先保存）—')
+console.log('— 连接卡：测试地址只测地址（不带 token）—')
 {
   const stub = startCase()
   await mount()
   inputOf('dsy-base-url').props.onChange({ target: { value: 'http://127.0.0.1:7777' } })
   inputOf('dsy-token').props.onChange({ target: { value: 'draft-token' } })
-  await button('测试连接').props.onClick()
+  await button('测试地址').props.onClick()
   const probeCall = callsOf(stub, 'testConnection')[0]
-  check('测试连接发的是页面里正在编辑的地址与 token', probeCall?.body?.baseUrl === 'http://127.0.0.1:7777' && probeCall?.body?.token === 'draft-token', JSON.stringify(probeCall?.body))
+  check('测试地址发的是页面里正在编辑的地址', probeCall?.body?.baseUrl === 'http://127.0.0.1:7777', JSON.stringify(probeCall?.body))
+  check('测试地址**不带 token**（这个按钮的结论不能被 token 影响）', probeCall?.body?.token === undefined, JSON.stringify(probeCall?.body))
   check('探测没有顺手保存配置', callsOf(stub, 'updateConfig').length === 0, JSON.stringify(stub.calls.map((call) => call.method)))
-  check('有失败项时给出错误提示', /有探测项失败，详见下方。/.test(messages()), messages())
-  check('失败项渲染出思源的 msg', /Auth failed/.test(textOf()), textOf().slice(-200))
+  check('地址不通时给出红色失败提示', /地址不通：/.test(messages()) && /dsy-msg err/.test(messageKinds()), `${messages()} / ${messageKinds()}`)
+  check('失败项渲染出宿主给的原始原因', /fetch failed/.test(textOf()), textOf().slice(-200))
   check('探测明细显示实际探测的地址', /探测地址：http:\/\/127\.0\.0\.1:6806/.test(textOf()), textOf().slice(-200))
 }
 {
-  startCase({ overrides: { testConnection: { value: { ok: true, version: '3.8.3', baseUrl: 'http://127.0.0.1:6806', tokenConfigured: true, tokenSource: 'draft', probes: [{ label: '系统版本', ok: true, detail: '3.8.3' }] } } } })
+  // 这是本次改动的核心场景：地址是通的，但没配 token。旧实现这里给的是红色
+  // 「有探测项失败」，落在地址下面就被读成"地址填错了"。
+  startCase({ overrides: { testConnection: { value: { ok: false, verdict: 'auth', version: '', baseUrl: 'http://127.0.0.1:6806', detail: '思源回了错误信封：code=-1 msg=Auth failed [session]', probes: [{ label: '系统版本 /api/system/version（不带 token，只测地址）', ok: false, detail: '思源回了错误信封：code=-1 msg=Auth failed [session]' }] } } } })
   await mount()
-  await button('测试连接').props.onClick()
-  check('全部探测通过时提示连接正常与版本', /连接正常，思源版本 3\.8\.3。/.test(messages()), messages())
+  await button('测试地址').props.onClick()
+  check('auth 态说"地址可达"而不是"地址错"', /地址可达/.test(messages()) && /不是地址填错/.test(messages()), messages())
+  check('auth 态用琥珀色（warn），不染红也不染绿', /dsy-msg warn/.test(messageKinds()) && !/dsy-msg err/.test(messageKinds()), messageKinds())
+  check('auth 态把下一步指向 API token 卡', /API token/.test(messages()), messages())
+  check('auth 态仍渲染探测明细（原始 msg 可见）', /Auth failed \[session\]/.test(textOf()), textOf().slice(-200))
+}
+{
+  startCase({ overrides: { testConnection: { value: { ok: true, verdict: 'ok', version: '3.8.3', baseUrl: 'http://127.0.0.1:6806', detail: '思源版本 3.8.3', probes: [{ label: '系统版本 /api/system/version（不带 token，只测地址）', ok: true, detail: '思源版本 3.8.3' }] } } } })
+  await mount()
+  await button('测试地址').props.onClick()
+  check('地址通时提示地址可用与版本', /地址可用：思源 v3\.8\.3。/.test(messages()) && /dsy-msg ok/.test(messageKinds()), `${messages()} / ${messageKinds()}`)
+}
+{
+  // 宿主没重启（还是旧路由，没有 verdict）时页面要能降级，不能整块崩掉。
+  startCase({ overrides: { testConnection: { value: { ok: false, version: '', baseUrl: 'http://127.0.0.1:6806', probes: [{ label: '系统版本', ok: false, detail: '有探测项失败' }] } } } })
+  await mount()
+  await button('测试地址').props.onClick()
+  check('旧宿主（无 verdict）降级成两态，页面不崩', /地址不通：|地址可用：/.test(messages()), messages())
 }
 
 // ── token 路径 ─────────────────────────────────────────────────────────────
@@ -329,6 +362,48 @@ console.log('— token 路径 —')
   await button('清除').props.onClick()
   check('清除调用 clearToken', callsOf(stub, 'clearToken').length === 1, JSON.stringify(stub.calls.map((call) => call.method)))
   check('清除后提示已清除', /已清除 token。/.test(messages()), messages())
+}
+
+console.log('— token 卡：测试按钮（测不通过也允许保存）—')
+{
+  const stub = startCase()
+  await mount()
+  check('已配置 token 时「测试 token」可用（不必先粘贴）', button('测试 token').props.disabled === false)
+  inputOf('dsy-token').props.onChange({ target: { value: 'draft-token' } })
+  await button('测试 token').props.onClick()
+  const testCall = callsOf(stub, 'testToken')[0]
+  check('测试 token 发的是正在编辑的地址与 token', testCall?.body?.token === 'draft-token' && typeof testCall?.body?.baseUrl === 'string', JSON.stringify(testCall?.body))
+  check('测试通过时提示 token 有效', /token 有效/.test(messages()) && /dsy-msg ok/.test(messageKinds()), `${messages()} / ${messageKinds()}`)
+  check('测试不写凭据（没发 setToken）', callsOf(stub, 'setToken').length === 0, JSON.stringify(stub.calls.map((call) => call.method)))
+  check('测试之后输入框仍保留草稿（便于改完再测）', inputOf('dsy-token').props.value === 'draft-token')
+}
+{
+  const stub = startCase({ overrides: { testToken: { value: { ok: false, kind: 'auth', baseUrl: 'http://127.0.0.1:6806', tokenConfigured: true, tokenSource: 'draft', usedDraft: true, detail: '思源接口 /api/notebook/lsNotebooks 失败：code=-1 msg=Auth failed' } } } })
+  await mount()
+  inputOf('dsy-token').props.onChange({ target: { value: 'wrong' } })
+  await button('测试 token').props.onClick()
+  check('token 被拒时明说是被拒（不是笼统的"测试失败"）', /思源拒绝了这个 token/.test(messages()) && /Auth failed/.test(messages()), messages())
+  check('被拒时明说"不影响保存"', /不影响保存/.test(messages()), messages())
+  check('**测完照样能保存**：「保存 token」仍可点', button('保存 token').props.disabled === false)
+  await button('保存 token').props.onClick()
+  check('被拒的 token 仍被写进凭据库（测试不当地门禁）', callsOf(stub, 'setToken').length === 1 && callsOf(stub, 'setToken')[0]?.body?.token === 'wrong', JSON.stringify(stub.calls.map((call) => call.method)))
+}
+{
+  startCase({ overrides: { testToken: { value: { ok: false, kind: 'unreachable', baseUrl: 'http://127.0.0.1:6806', tokenConfigured: true, tokenSource: 'draft', usedDraft: true, detail: '连接思源失败（http://127.0.0.1:6806/api/notebook/lsNotebooks）：fetch failed' } } } })
+  await mount()
+  inputOf('dsy-token').props.onChange({ target: { value: 'whatever' } })
+  await button('测试 token').props.onClick()
+  check('连不上时用琥珀色并说"未被验证"（不甩锅给 token）', /未被验证/.test(messages()) && /dsy-msg warn/.test(messageKinds()) && !/dsy-msg err/.test(messageKinds()), `${messages()} / ${messageKinds()}`)
+  check('连不上时也明说"不影响保存"', /不影响保存/.test(messages()), messages())
+  check('连不上时「保存 token」仍可点', button('保存 token').props.disabled === false)
+}
+{
+  // 什么都没有可测时：按钮禁用，而不是点了才报一句"没有 token"。
+  const stub = startCase({ overrides: { getState: { value: { ...stateForClient, token: { configured: false, source: '', writable: true } } } } })
+  await mount()
+  check('既没草稿也没已保存的 token 时「测试 token」禁用', button('测试 token').props.disabled === true)
+  await button('测试 token').props.onClick()
+  check('禁用时点了也不会发请求', callsOf(stub, 'testToken').length === 0, JSON.stringify(stub.calls.map((call) => call.method)))
 }
 
 // ── 默认笔记本 ─────────────────────────────────────────────────────────────
@@ -461,7 +536,7 @@ console.log('— 各卡互不锁定 —')
   button('保存 token').props.onClick() // 故意不 await：让 token 卡停在"进行中"
   check('请求进行中的那张卡自己禁用', button('保存 token').props.disabled === true)
   check('别的卡不受影响（工具开关仍可点）', findSwitch(elementsOf(), 'siyuan_search').props['aria-disabled'] !== true && findSwitch(elementsOf(), 'siyuan_search').props.tabIndex === 0, JSON.stringify({ disabled: findSwitch(elementsOf(), 'siyuan_search').props['aria-disabled'], tabIndex: findSwitch(elementsOf(), 'siyuan_search').props.tabIndex }))
-  check('别的卡不受影响（测试连接仍可点）', button('测试连接').props.disabled === false)
+  check('别的卡不受影响（测试地址仍可点）', button('测试地址').props.disabled === false)
   check('「重新读取」在有任何请求时都禁用（它会整体重载）', button('重新读取').props.disabled === true)
 }
 
@@ -469,7 +544,7 @@ console.log('— 并发：一张卡在飞时，别的卡开始请求不得把它
 {
   // 2026-09-28 评审 F1：pending 曾是单值，B 卡一开始就把 A 卡的 busy 顶掉，B 一完成又把
   // A 的锁清空——A 的请求还在飞，卡片却已经显示空闲，用户可以重复提交。
-  // 退回单值后，下面「本卡按钮仍在锁」与「测试连接完成后仍在锁」两条会红。
+  // 退回单值后，下面「本卡按钮仍在锁」与「测试地址完成后仍在锁」两条会红。
   const stub = startCase({ hold: ['updateConfig', 'testConnection'] })
   await mount()
   flipRow('全文检索') // 拨一个开关，让「保存开关」可用（请求被挂起 → dirty 一直为真）
@@ -478,15 +553,15 @@ console.log('— 并发：一张卡在飞时，别的卡开始请求不得把它
   check('保存开关在飞：本卡按钮锁定', button('保存开关').props.disabled === true)
   check('保存开关在飞：本卡整行 aria-disabled', findSwitch(elementsOf(), '全文检索').props['aria-disabled'] === true)
 
-  button('测试连接').props.onClick() // 另一张卡开始请求
+  button('测试地址').props.onClick() // 另一张卡开始请求
   await drain()
   check('另一张卡开始请求后：本卡按钮仍在锁', button('保存开关').props.disabled === true, `disabled=${String(button('保存开关').props.disabled)}`)
   check('另一张卡开始请求后：本卡整行仍在锁', findSwitch(elementsOf(), '全文检索').props['aria-disabled'] === true)
   check('两卡同时在飞：「重新读取」仍禁用', button('重新读取').props.disabled === true)
 
-  stub.held[1].release() // 先放行「测试连接」
+  stub.held[1].release() // 先放行「测试地址」
   await drain()
-  check('测试连接完成后：本卡仍在锁（它自己的请求还没回来）', button('保存开关').props.disabled === true, `disabled=${String(button('保存开关').props.disabled)}`)
+  check('测试地址完成后：本卡仍在锁（它自己的请求还没回来）', button('保存开关').props.disabled === true, `disabled=${String(button('保存开关').props.disabled)}`)
 
   stub.held[0].release() // 再放行「保存开关」
   await drain()
@@ -551,7 +626,7 @@ console.log('— 锁与反馈都落在本卡 —')
   button('保存笔记本').props.onClick()
   await drain()
   check('保存笔记本在飞：笔记本卡锁定', button('保存笔记本').props.disabled === true)
-  check('保存笔记本在飞：连接卡不锁（各卡互不锁定）', button('测试连接').props.disabled === false)
+  check('保存笔记本在飞：连接卡不锁（各卡互不锁定）', button('测试地址').props.disabled === false)
   stub.held[0].release()
   await drain()
   check('成功文案落在默认笔记本卡', cardText('默认笔记本').includes('默认笔记本已保存。'), cardText('默认笔记本').slice(0, 120))

@@ -15,6 +15,7 @@
  */
 
 import fs from 'node:fs'
+import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { startMockSiYuan } from './mock-siyuan.mjs'
@@ -125,6 +126,25 @@ const injectedCtx = {
   },
 }
 ctx.inject = (deps, callback) => callback(injectedCtx)
+
+/**
+ * 临时起一个只会回固定内容的 HTTP 服务，用来钉住地址判定的分支
+ * （"思源回鉴权错误"与"这里根本不是思源"这两条路径替身给不出来）。
+ */
+async function startStubService(payload, { raw = false } = {}) {
+  const server = http.createServer((request, response) => {
+    request.resume()
+    request.on('end', () => {
+      response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })
+      response.end(raw ? payload : JSON.stringify(payload))
+    })
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  return {
+    baseUrl: `http://127.0.0.1:${server.address().port}`,
+    close: () => new Promise((resolve) => server.close(resolve)),
+  }
+}
 
 console.log('— apply() 挂载 —')
 plugin.apply(ctx)
@@ -444,14 +464,13 @@ console.log('— 路由：逐工具开关与旧配置迁移 —')
 
 console.log('— 路由：探测用页面草稿（不落盘也能测） —')
 {
-  // 草稿给一个必然连不上的地址：探测必须按草稿走，否则"填了新地址、没保存就点测试连接"
+  // 草稿给一个必然连不上的地址：探测必须按草稿走，否则"填了新地址、没保存就点测试"
   // 测的是旧地址，结论会误导人。同时断言探测**不写配置**。
   const baseUrlBefore = (await call('getState', {})).payload?.value?.config?.baseUrl
   const draftProbe = await call('testConnection', { baseUrl: 'http://127.0.0.1:1', token: 'draft-token' })
   const value = draftProbe.payload?.value
   check('testConnection 回报实际探测的地址', value?.baseUrl === 'http://127.0.0.1:1', String(value?.baseUrl))
-  check('草稿 token 被当作已配置（不读凭据库）', value?.tokenConfigured === true && value?.tokenSource === 'draft', JSON.stringify({ tokenConfigured: value?.tokenConfigured, tokenSource: value?.tokenSource }))
-  check('草稿地址连不上时如实报失败', value?.ok === false, JSON.stringify(value?.probes).slice(0, 200))
+  check('草稿地址连不上时如实报失败（verdict=fail）', value?.ok === false && value?.verdict === 'fail', JSON.stringify(value?.probes).slice(0, 200))
   check('探测不改动配置', (await call('getState', {})).payload?.value?.config?.baseUrl === baseUrlBefore, `${baseUrlBefore} → ${(await call('getState', {})).payload?.value?.config?.baseUrl}`)
 
   const badDraft = await call('testConnection', { baseUrl: 'not a url' })
@@ -469,6 +488,46 @@ console.log('— 路由：探测用页面草稿（不落盘也能测） —')
   }
   await call('updateConfig', { baseUrl: DEFAULT_BASE })
   check('baseUrl 已还原（后面的断言依赖它指向替身）', (await call('getState', {})).payload?.value?.config?.baseUrl === DEFAULT_BASE)
+}
+
+// C9：地址下面那个测试按钮**只测地址**。旧实现拿三条探测凑一个"全过才算成功"，
+// 没配 token 时两条鉴权探测必然失败，红字落在地址下面就被读成"地址填错了"
+// （可版本号明明在下方探明细里）。这里钉住"不带 token、只发一条、只回三态"。
+console.log('— 路由：地址测试只测地址（不带 token） —')
+{
+  const probe = await call('testConnection', {})
+  const value = probe.payload?.value
+  check('判定是三态之一（ok / auth / fail）', ['ok', 'auth', 'fail'].includes(value?.verdict), JSON.stringify(value).slice(0, 200))
+  check('只发一条探测（不再拿鉴权接口凑数）', Array.isArray(value?.probes) && value.probes.length === 1, JSON.stringify(value?.probes).slice(0, 200))
+  check('探测明细标明不带 token', /不带 token/.test(value?.probes?.[0]?.label ?? ''), JSON.stringify(value?.probes?.[0]))
+  if (mock !== null) {
+    check('对着替身（地址通、是思源）判定为 ok 并带回版本', value?.verdict === 'ok' && value?.ok === true && value?.version === '3.8.3', JSON.stringify(value).slice(0, 200))
+  } else {
+    check('对着真实实例：ok 时带回版本', value?.verdict !== 'ok' || typeof value?.version === 'string', JSON.stringify(value).slice(0, 200))
+  }
+
+  if (mock !== null) {
+    // 替身记下每次请求**有没有带 Authorization 头**：这里要证明"即使 body 里给了
+    // 合法 token，地址探测也不带这个头"——否则这个按钮的结论仍然会被 token 影响。
+    // 断言的是"带头"而不是"值对不对"：只断言 authorized 的话，随便换个错 token 也能蒙混过关。
+    const versionBefore = mock.requestsTo('/api/system/version').length
+    const notebooksBefore = mock.requestsTo('/api/notebook/lsNotebooks').length
+    await call('testConnection', { baseUrl: DEFAULT_BASE, token: mock.token })
+    const versionHits = mock.requestsTo('/api/system/version').slice(versionBefore)
+    check('地址探测不带 Authorization 头（body 给了合法 token 也不带）', versionHits.length > 0 && versionHits.every((entry) => entry.hasAuthHeader !== true), JSON.stringify(versionHits.map((entry) => entry.hasAuthHeader)))
+    check('地址探测不碰任何需要鉴权的接口', mock.requestsTo('/api/notebook/lsNotebooks').length === notebooksBefore, `${notebooksBefore} → ${mock.requestsTo('/api/notebook/lsNotebooks').length}`)
+  }
+
+  // 钉住另外两个分支：它们才是"红字说地址错"的来源，必须有专门的状态而不是笼统的失败。
+  const authService = await startStubService({ code: -1, msg: 'Auth failed [session]', data: null })
+  const authProbe = await call('testConnection', { baseUrl: authService.baseUrl })
+  check('思源回鉴权错误 → auth（地址可达，不是地址错）', authProbe.payload?.value?.verdict === 'auth' && authProbe.payload?.value?.ok === false, JSON.stringify(authProbe.payload?.value).slice(0, 200))
+  await authService.close()
+
+  const htmlService = await startStubService('<html>not siyuan</html>', { raw: true })
+  const htmlProbe = await call('testConnection', { baseUrl: htmlService.baseUrl })
+  check('返回非 JSON（多半指向别的服务）→ fail 且说清原因', htmlProbe.payload?.value?.verdict === 'fail' && /不是思源/.test(htmlProbe.payload?.value?.detail ?? ''), JSON.stringify(htmlProbe.payload?.value?.detail).slice(0, 200))
+  await htmlService.close()
 }
 
 
@@ -489,10 +548,34 @@ console.log('— 路由：token 与思源接口错误面 —')
 
   const probe = await call('testConnection', {})
   const probes = probe.payload?.value?.probes ?? []
-  check('testConnection 返回三条探测', probes.length === 3, JSON.stringify(probes).slice(0, 220))
-  check('公开接口 /api/system/version 探测成功', probes[0]?.ok === true, JSON.stringify(probes[0]))
-  check('需要鉴权的接口探测失败并带 msg', probes[1]?.ok === false && /code=/.test(probes[1]?.detail ?? ''), JSON.stringify(probes[1]))
-  check('testConnection 整体判定为失败', probe.payload?.value?.ok === false)
+  check('testConnection 只探测公开接口 /api/system/version', probes.length === 1 && /\/api\/system\/version/.test(probes[0]?.label ?? ''), JSON.stringify(probes).slice(0, 220))
+}
+
+// C10：token 的测试与保存是**两件独立的事**。测试失败（token 不对、地址不通、服务没起）
+// 一律不许拦住保存——用户可能就是先把 token 存好，回头服务起来再用。
+console.log('— 路由：token 测试（只读，且不阻断保存） —')
+{
+  // 替身模式下四态都能钉死；--live 时真实实例的鉴权设置不可控，只断言结构。
+  const none = await call('testToken', {})
+  check('没有任何 token 可测时判定 empty（不是错误信封）', none.payload?.value?.kind === 'empty' && /没有可测试的 token/.test(none.payload?.value?.detail ?? ''), JSON.stringify(none.payload?.value).slice(0, 220))
+
+  const dead = await call('testToken', { baseUrl: 'http://127.0.0.1:1', token: 'whatever' })
+  check('连不上思源时判定 unreachable（说"未被验证"，不是"token 不对"）', dead.payload?.value?.kind === 'unreachable' && dead.payload?.value?.ok === false, JSON.stringify(dead.payload?.value).slice(0, 220))
+
+  if (mock !== null) {
+    const good = await call('testToken', { baseUrl: DEFAULT_BASE, token: mock.token })
+    check('token 正确时判定 ok', good.payload?.value?.kind === 'ok' && good.payload?.value?.ok === true, JSON.stringify(good.payload?.value).slice(0, 220))
+    check('回报用的是草稿 token（页面正在编辑、还没保存的那个）', good.payload?.value?.usedDraft === true && good.payload?.value?.tokenSource === 'draft', JSON.stringify(good.payload?.value).slice(0, 220))
+    check('回报实际探测的地址', good.payload?.value?.baseUrl === DEFAULT_BASE, String(good.payload?.value?.baseUrl))
+    const authed = mock.state.requests.filter((entry) => entry.path === '/api/notebook/lsNotebooks' && entry.authorized === true).length
+    check('token 测试确实带了 Authorization 头（与地址测试相反）', authed > 0, String(authed))
+
+    const wrong = await call('testToken', { baseUrl: DEFAULT_BASE, token: 'definitely-not-the-token' })
+    check('token 不对时判定 auth（而不是笼统的 fail）', wrong.payload?.value?.kind === 'auth' && wrong.payload?.value?.ok === false, JSON.stringify(wrong.payload?.value).slice(0, 220))
+    check('auth 分支带思源原始 msg，便于分辨是被鉴权拒绝', /Auth failed|code=/.test(wrong.payload?.value?.detail ?? ''), JSON.stringify(wrong.payload?.value?.detail).slice(0, 200))
+  }
+
+  check('测试 token 不改动配置', (await call('getState', {})).payload?.value?.config?.baseUrl === DEFAULT_BASE, String((await call('getState', {})).payload?.value?.config?.baseUrl))
 }
 
 console.log('— 工具执行：错误面 —')
@@ -582,6 +665,15 @@ console.log('— 凭据路径（伪造 credentials 服务）—')
   const stateWithToken = await call2('getState', {})
   check('已配置 token 时 getState 报告 configured/来源/可写', stateWithToken.payload?.value?.token?.configured === true && stateWithToken.payload?.value?.token?.source === 'store' && stateWithToken.payload?.value?.token?.writable === true, JSON.stringify(stateWithToken.payload?.value?.token))
   check('getState 不回显 token 值', !JSON.stringify(stateWithToken.payload).includes('stored-token'))
+
+  // 「测试失败不阻断保存」是这次改动的硬约束：先把一次**失败**的测试跑出来，
+  // 再证明保存照样成功——不然"测试按钮"很容易在后面被人当成保存的前置条件。
+  const writesBeforeTest = credentialCalls.length
+  const failedTest = await call2('testToken', { token: 'wrong-token-for-sure' })
+  check('凭据库里有 token 时，错误的 token 判定为 auth', failedTest.payload?.value?.kind === 'auth' && failedTest.payload?.value?.ok === false, JSON.stringify(failedTest.payload?.value).slice(0, 220))
+  check('testToken 是只读的：不写配置也不写凭据', credentialCalls.length === writesBeforeTest, JSON.stringify(credentialCalls))
+  const stillSaved = await call2('setToken', { token: 'token-after-failed-test' })
+  check('**测试失败不阻断保存**：测完照样写得进凭据库', stillSaved.payload?.ok === true && credentialCalls.some((entry) => entry[0] === 'set' && entry[2] === 'token-after-failed-test'), JSON.stringify(credentialCalls))
 
   const setToken = await call2('setToken', { token: '  new-token  ' })
   check('setToken 写入凭据库并去除首尾空白', setToken.payload?.ok === true && credentialCalls.some((entry) => entry[0] === 'set' && entry[1] === 'SIYUAN_TOKEN' && entry[2] === 'new-token'), JSON.stringify(credentialCalls))
