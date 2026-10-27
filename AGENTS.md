@@ -36,6 +36,7 @@ node test/harness.mjs --live   # 可选：改成探测真实实例 127.0.0.1:680
 | `docs/code-review-2026-09-12.md` | 历史评审，含「避免误改」清单 |
 | `docs/ui-design.md` | **界面设计契约**：token 纪律、颜色语义、焦点与间距规范、三层验证方法 |
 | `docs/ui-review-2026-10-04.md` | 界面评审记录（U1–U9），含宿主设计 token 实测值与对照 |
+| `docs/npm-publish.md` | 固定的 NPM 登录、打包、发布、授权和发布结果验证流程 |
 | `tools/ui-contrast.mjs` | 对比度审计（**opt-in，不在 `npm test`**）：反解宿主主题 token 算 WCAG |
 | `docs/handover.md` | 本机现场备忘，已 gitignore，**永不提交** |
 
@@ -81,6 +82,20 @@ node test/harness.mjs --live   # 可选：改成探测真实实例 127.0.0.1:680
 - 不要提交 `docs/handover.md`（含本机地址、token 来源、安装状态）。
 - 不要手工编辑 awesome-dsh-plugin 仓库的 README（由 `data/plugins/*.yml` 生成）。
 - 一次工具调用只处理一个文档/块是**有意的设计**，不要「顺手」做成批量。
+
+## 需要用户确认的交互操作
+
+### Git 操作
+
+全局 Git 纪律要求 commit、push、tag、reset、stash 等写操作必须先获得用户明确确认。
+
+目标模式会自动推进任务，因此在目标模式下遇到 Git 写操作时，**必须使用提问选项等待用户确认**，不能只在普通回复中请求确认，也不能因为目标模式自动推进而跳过确认。
+
+用户未确认时，保持任务等待，不执行 Git 写操作。
+
+### NPM 打包与发布
+
+固定命令、退出码判断、后台任务、授权链接和发布结果验证流程统一见 [`docs/npm-publish.md`](docs/npm-publish.md)，不得自行简化或改成模糊的“登录后发布”。不得读取、打印或索要 NPM 凭据文件和长期 token。
 
 ## 提交信息
 
