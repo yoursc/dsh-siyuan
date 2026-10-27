@@ -197,6 +197,30 @@ check('组说明行缩进到文字列（padding-left:50px）', /\.dsy-group-hint
 check('危险组的组开关 ON 用琥珀（红标题不配绿开关）', cssText.includes('.dsy-switch.master.dsy-tone-danger.on{background:var(--dsw-alias-state-warn-primary,var(--dsw-alias-state-error-primary))}'))
 check('整行 hover 有底纹（长列表不串行）', cssText.includes('.dsy-tool:hover{background:var(--dsw-alias-interactive-bg-hover)}'))
 check('工具行之间有细分隔线', cssText.includes('.dsy-tool + .dsy-tool{border-top:.5px solid var(--dsw-alias-border-l1)}'))
+// 以下五条守的是 docs/ui-review-2026-10-04.md 的 U1/U2：这两条缺陷只在 token 选择上，
+// 不写断言的话"改回裸色值 / 换回更淡的焦点色"照样全绿。宿主 token 实际色值见该文件附录 B。
+check('开关小球跟随宿主 switch-thumb，不写死颜色', /\.dsy-switch \.dsy-switch-knob\{[^}]*background:var\(--dsw-alias-switch-thumb\)/.test(cssText))
+check('ON 态小球用 label-primary-foreground（暗色下它是近黑，不是白）', /\.dsy-switch\.on \.dsy-switch-knob\{background:var\(--dsw-alias-label-primary-foreground\)\}/.test(cssText))
+const focusRules = cssText.match(/[^{}]*:focus(?:-visible)?[^{}]*\{[^}]*\}/g) ?? []
+check('焦点规则一律不引用 border-l2（l2 比默认边框 l4 更淡，聚焦后反而变淡）', focusRules.length >= 4 && focusRules.every((rule) => !rule.includes('--dsw-alias-border-l2')), focusRules.join(' | '))
+check('四个可聚焦控件都落到 state-business-primary（宿主 Input/Checkbox/Switch 同款）',
+	cssText.includes('.dsy-input:focus{border-color:var(--dsw-alias-state-business-primary)}') &&
+	cssText.includes('.dsy-btn:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary)') &&
+	cssText.includes('.dsy-switch:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary)') &&
+	cssText.includes('.dsy-tool:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary)'))
+// 裸色值扫描：先剥掉 /* */ 注释（注释里会写 token 的实际色值来解释问题），且只看"上色"类
+// 声明——box-shadow 的 rgba 不计（宿主也没有阴影 token，不算纪律违反）。
+const PAINT_PROPERTIES = ['background', 'background-color', 'color', 'border-color', 'outline-color', 'fill', 'stroke']
+const rawPaints = []
+for (const declaration of cssText.replace(/\/\*[\s\S]*?\*\//g, '').split(';')) {
+	const colon = declaration.indexOf(':')
+	if (colon < 0) continue
+	const property = declaration.slice(0, colon).split('{').pop().trim()
+	if (PAINT_PROPERTIES.includes(property) === false) continue
+	const value = declaration.slice(colon + 1)
+	if (/#[0-9a-fA-F]{3,8}\b|rgba?\([0-9][^)]*\)/.test(value)) rawPaints.push(property + ':' + value.trim())
+}
+check('上色声明里没有裸色值（颜色全部走 --dsw-* token，才能跟随宿主主题）', rawPaints.length === 0, rawPaints.join(' | '))
 
 console.log('— 图标常量 —')
 check('internals 暴露导航图标实现', internals !== undefined && typeof internals.patchNavCell === 'function' && typeof internals.watchNavIcon === 'function')

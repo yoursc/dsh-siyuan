@@ -1,7 +1,7 @@
 node_modules/
 .npm-cache/
+tmp/
 npm-debug.log*
 *.log
 .DS_Store
 docs/handover.md
-awesome-submission/

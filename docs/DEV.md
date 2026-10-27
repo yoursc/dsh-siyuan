@@ -83,6 +83,84 @@
 | `test/client-harness-lib.mjs` | 客户端测试共享支持：bundle 加载 + 宿主夹具（`buildHostState`）+ 可执行 React 替身 + 元素查找 |
 | `test/client-interactive.mjs` | 设置页交互层：fetch 替身驱动加载/错误、四张卡各自保存（请求体只带本卡字段）、草稿探测、逐工具与整组开关 |
 | `package.json` | `dsh.bundle.patch`（安装通道）、`dshhub`（目录元数据）、`files`（发布清单） |
+| `tools/ui-contrast.mjs` | 对比度审计（**opt-in，不进 `npm test`**）：反解宿主主题 token 算 WCAG，见「界面怎么验」 |
+| `docs/ui-design.md` | 界面设计契约：token 纪律、颜色语义、焦点与间距规范、三层验证方法 |
+| `docs/ui-review-2026-10-04.md` | 界面评审记录（U1–U9），含宿主设计 token 实测值 |
+| `tmp/siyuan-src/` | **思源笔记稀疏源码检出（gitignore，不提交）**——查接口契约与内置 agent 实现时对着看，来源与重建方法见下节 |
+| `docs/research/` | 思源内置 agent 提示词的调研产物：报告、system prompt 逐字原文、两个体量计量脚本 |
+
+## 思源参考源码（`tmp/siyuan-src/`）
+
+改本插件时有两类问题「文档说不清，只能对着上游源码看」：
+思源某个接口的**真实怪癖**（异步落库、静默 no-op、只保留第一段），
+以及思源**内置 AI agent 是怎么把提示词和工具喂给模型的**。
+为此在 `tmp/` 下放一份思源笔记的**稀疏源码检出**。
+
+| | |
+|---|---|
+| 来源 | <https://github.com/siyuan-note/siyuan>（AGPL-3.0，b3log.org） |
+| 版本 | commit `1588124`（2026-09-29），`app/package.json` 记为 **3.8.6** |
+| 方式 | `git clone --filter=tree:0 --depth=1 --no-checkout` + `sparse-checkout`（**treeless**，不下载用不到的 blob） |
+| 落地 | 工作树约 33 MB + `.git` 约 37 MB ≈ 70 MB |
+| 是否提交 | **否**。`.gitignore` 第 3 行 `tmp/`；`git status` 看不见它，也不进 `npm pack`（`files` 是白名单） |
+
+**这不是依赖**：`npm test` 不需要它，删掉 `tmp/` 本插件照常工作。它只是**查资料用的参考副本**。
+
+### 重新获取
+
+```bash
+cd <本仓库>
+git clone --filter=tree:0 --depth=1 --no-checkout https://github.com/siyuan-note/siyuan.git tmp/siyuan-src
+cd tmp/siyuan-src
+git sparse-checkout init --cone
+git sparse-checkout set app/guide app/src/ai app/src/config/tabs/ai app/src/layout/dock/agent \
+                         docs kernel/agent kernel/api kernel/apicontract kernel/conf kernel/mcp kernel/util
+git checkout HEAD
+```
+
+**想跟上游保持同步**（版本会往前走，本仓库记的 commit 只是拉取当天的快照）：
+
+```bash
+cd tmp/siyuan-src && git fetch --depth=1 origin master && git reset --hard FETCH_HEAD
+```
+
+sparse 目录不用重列，`git reset --hard` 之后仍是同一批路径。
+
+### 检出了什么
+
+| 路径 | 里面有什么 |
+|---|---|
+| `kernel/mcp/tools/` | **34 个内置 agent 工具的定义**（`&Tool{Name, Description, InputSchema, ActionEffects}`）——`Description` 就是喂给 LLM 的提示词 |
+| `kernel/agent/` | **system prompt 常量**在 `agent.go:47`（`const systemPrompt`）；拼装顺序看 `agent.go:2032` 的 `buildSystemPrompt`；技能/AGENTS.md 注入、能力裁剪 `capability.go:140`、压缩摘要 `compaction.go` |
+| `kernel/util/` | `skill.go`（`SKILL.md` 发现与安装）、`agent_instructions.go`（`data/ai/AGENTS.md` 读取与乐观锁） |
+| `kernel/api/` | agent 的 HTTP 接口（`/api/ai/agent/*`） |
+| `app/src/layout/dock/agent/` | 前端：4 个浏览器能力 `frontendCapabilities.ts`、会话 UI |
+| `app/src/ai/skills/`、`app/src/config/tabs/ai/` | 技能管理页与「设置 - 人工智能」页 |
+| `app/guide/` | 4 份随包发布的《AI 智能体》用户指南（`.sy` JSON，简体中文那条是 `20260804171000-aiagt01`） |
+| `docs/` | 上游开发文档，含 `SKILL-MANAGER.zh-CN.md` |
+
+**`app/guide/` 占了工作树的 18 MB，却和 agent 实现无关**，纯粹是内置指南数据。
+嫌大可以去掉这一行 `git sparse-checkout set`，省 18 MB；去掉后
+`siyuan-builtin-agent-prompt.md` 第 6 节引用到的指南结论不受影响（那些是读出来的，不是脚本读的）。
+
+### 调研产物
+
+`docs/research/` 下是对这份源码的静态分析，**随仓库提交**（很小，且是结论的出处）：
+
+| 文件 | 作用 |
+|---|---|
+| `siyuan-builtin-agent-prompt.md` | 调研报告：完整 system prompt 拼装结构、工具面、能力 ID 方案、权限模型、体量对比 |
+| `siyuan-agent-systemprompt.verbatim.txt` | `agent.go:47` 的**逐字原文**（13 444 字符），用 `sed -n '47,142p' kernel/agent/agent.go` 提取 |
+| `count-siyuan-descriptions.py` | 解析 Go 字面量，统计 34 个工具的 description 字符数（对应报告第 6 节） |
+| `count-plugin-descriptions.mjs` | 仿 `test/tools-e2e.mjs` 的 mock ctx 真注册一遍，统计本插件 17 个工具的 description 字符数 |
+
+```bash
+python3 docs/research/count-siyuan-descriptions.py    # 需要 tmp/siyuan-src；可用 SIYUAN_SRC=<路径> 覆盖
+node docs/research/count-plugin-descriptions.mjs       # 在仓库根跑
+```
+
+两个脚本**只统计不校验**，是调研工具而不是测试——数字会随工具增删漂移，
+引用前重跑，别把当前数字当契约（同「测试」节那条：条数会漂移，别写死）。
 
 ## 本地开发安装
 
@@ -164,6 +242,29 @@ H5（删除复核窗口）、H6（多段丢弃）、B1（请求中取消）、B3
 12 项变红）都是这么验证过的；
 其中 B1 的第一版断言其实测不出修复（新旧实现都会抛 `AbortError`），是靠"摘掉修复看是否变红"
 才发现并补强的。
+
+### 界面（设置页）怎么验
+
+界面分三层验，能力严格递减——**前两层可自动化，第三层不行**：
+
+| 层 | 覆盖 | 手段 | 进 `npm test`？ |
+|---|---|---|---|
+| 1. 颜色对比度 | token 实际色值、WCAG 对比度 | `node tools/ui-contrast.mjs` | ❌ opt-in |
+| 2. 结构 + 样式纪律 | DOM 结构、aria、文案、**有无裸色值**、焦点色 | `client-render.mjs` / `client-interactive.mjs` / `client-navicon.mjs` | ✅ |
+| 3. 真实渲染 | **布局、间距、对齐、溢出、hover** | 真人在 dsh web 页面上看 | ❌ 不可能 |
+
+第 1 层**不能**塞进 `npm test`：它要读宿主 dsh 安装目录里的 `@deepseek-ai/dsh-client-ui-theme`
+才能拿到设计 token 的真实色值，违反「三不」里的自包含。它是开发者审计工具；退出码在
+**插件缺陷**项失败时为 1（宿主参照行只报数不计失败）。逐项含义见 `docs/ui-design.md` 第七节，
+实测结论见 `docs/ui-review-2026-10-04.md`。
+
+第 3 层**不要试图自动化**，也不要自建渲染器去补上缺失的浏览器控制。DSH 的
+`cordis-plugin-development` 契约明确禁止（*"emulate React/DOM, or implement a custom
+renderer to compensate for missing browser control. A screenshot of a mock page is not
+verification of the running plugin."*）；而且设置页只在 dsh web 壳内成立（需要
+`window.__DSH_BOOT__`、client-modules 的 react、宿主 `/siyuan/api/*` 路由与鉴权），
+抽掉壳渲染出来的图是 mock——正是本仓库最警惕的「假绿」。三条合规路径
+（含"怎么让 agent 自己拿到真实浏览器控制权"）见 `docs/ui-design.md` 第八节。
 
 ## 发布
 
