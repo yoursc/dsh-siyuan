@@ -59,7 +59,7 @@ const NOTEBOOK_LIST = [
  */
 function stubFetch(getStateValue, { notebooks = NOTEBOOK_LIST } = {}) {
   return async (url) => {
-    const method = String(url).replace('/siyuan/api/', '')
+    const method = String(url).replace(/^.*(?:\/|^)siyuan\/api\//, '')
     if (method === 'getState') return Response.json({ ok: true, value: getStateValue })
     if (method === 'listNotebooks') {
       if (notebooks === 'fail') throw new TypeError('fetch failed')

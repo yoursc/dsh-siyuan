@@ -59,6 +59,9 @@ exportsObject.apply({
 })
 const Section = registered.component
 
+// 模拟飞牛这类反向代理子路径部署；客户端发出的相对 URL 应解析到该前缀下。
+globalThis.document = { baseURI: 'https://example.test/fngateway/' }
+
 // ── 可编程 fetch 替身 ──────────────────────────────────────────────────────
 
 let stateForFetch = stateForClient
@@ -125,9 +128,10 @@ function createFetchStub({ overrides = {}, network = false, timeout = false, han
     return Response.json({ ok: true, value: null })
   }
   const stub = async (url, init) => {
-    const method = String(url).replace('/siyuan/api/', '')
+    const resolvedUrl = new URL(String(url), globalThis.document?.baseURI ?? 'http://dsh.test/').toString()
+    const method = new URL(resolvedUrl).pathname.split('/siyuan/api/')[1] ?? ''
     const body = init?.body === undefined ? undefined : JSON.parse(init.body)
-    calls.push({ method, body, hasSignal: init?.signal instanceof AbortSignal })
+    calls.push({ method, url: resolvedUrl, body, hasSignal: init?.signal instanceof AbortSignal })
     if (hang.includes(method)) return new Promise(() => {})
     if (hold.includes(method)) {
       const response = await respond(method, init)
@@ -236,6 +240,7 @@ console.log('— 加载路径 —')
   // api() 必须给 fetch 挂超时 signal（兜底超时的前提）。
   check('api() 的 fetch 带超时取消信号', callsOf(stub, 'getState')[0]?.hasSignal === true)
   check('挂载时自动调用宿主 getState 一次', callsOf(stub, 'getState').length === 1, JSON.stringify(stub.calls.map((call) => call.method)))
+  check('API 请求保留反向代理子路径前缀', callsOf(stub, 'getState')[0]?.url === 'https://example.test/fngateway/siyuan/api/getState', callsOf(stub, 'getState')[0]?.url)
   check('请求体是空对象', JSON.stringify(callsOf(stub, 'getState')[0]?.body) === '{}')
   const loaded = textOf()
   check('加载成功后渲染四张卡', ['连接', 'API token', '默认笔记本', '工具开关'].every((title) => loaded.includes(title)), loaded.slice(0, 160))

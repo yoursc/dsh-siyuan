@@ -35,8 +35,10 @@ await import(clientPath)
 
 console.log('— bundle 加载 —')
 check('调用了 __ModuleLoader__.load', captured !== null)
-const packageName = JSON.parse(fs.readFileSync(path.join(import.meta.dirname, '..', 'package.json'), 'utf8')).name
+const packageManifest = JSON.parse(fs.readFileSync(path.join(import.meta.dirname, '..', 'package.json'), 'utf8'))
+const packageName = packageManifest.name
 check(`模块 id 等于包名（client-modules 硬性要求）：${packageName}`, captured?.id === packageName, `bundle 里注册的是 ${String(captured?.id)}`)
+check('locale 资源通过 package exports 暴露给 DSH', packageManifest.exports?.['./locale/*.json'] === './locale/*.json', JSON.stringify(packageManifest.exports))
 check('factory 是函数', typeof captured?.factory === 'function')
 
 // 最小 React 替身：只需模块作用域用到的 createElement；hooks 只在渲染时才会调用。

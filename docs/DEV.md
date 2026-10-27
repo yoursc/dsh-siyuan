@@ -284,13 +284,13 @@ npm publish                       # publishConfig 已带 registry 与 access:pub
 
 ```bash
 npm test                       # 7 套件全绿
-npm pack --dry-run             # 7 个文件：lib/×2 + cordis.patch.yml + CHANGELOG.md + npm 自带的 README/LICENSE/package.json
+npm pack --dry-run             # 9 个文件：lib/×2 + cordis.patch.yml + CHANGELOG.md + locale/×2 + npm 自带的 README/LICENSE/package.json
 npm view @yoursc/dsh-siyuan@<新版本> --registry https://registry.npmjs.org/   # 预期 404（该版本未占用）
 ```
 
 **版本策略**：首个公开版是 `0.0.1`（发 `latest`）。版本号语义要跟着**实际验证过的 dsh 版本**走，
 而不是跟着本体版本号：本插件的 `dsh.engines.dsh` 与 `dshhub.compatibility.dsh` 两处声明同一个
-范围，0.0.3 起为 `>=0.1.5-rc.1 || >=0.1.6-0 || >=0.1.7-0`，理由见下条。
+范围，0.0.4 起为 `>=0.1.5-rc.1 || >=0.1.6-0 || >=0.1.7-0 || >=0.2.1-rc.3`，理由见下条。
 
 **兼容范围为什么必须按 rc 线逐条枚举**：semver 只在「比较器里的预发布元组与候选版本的元组
 相同」时才对预发布放行。因此 `^0.1.5-rc.1` 会把 `0.1.6-*` / `0.1.7-*` 判为不兼容；换成
@@ -300,7 +300,7 @@ npm view @yoursc/dsh-siyuan@<新版本> --registry https://registry.npmjs.org/  
 加一段。改完用 npm 自带 semver 复核（先 `npm view @deepseek-ai/dsh versions` 看有哪些版本）：
 
 ```bash
-node -e "const s=require('/usr/local/lib/node_modules/npm/node_modules/semver');const r='>=0.1.5-rc.1 || >=0.1.6-0 || >=0.1.7-0';for(const v of ['0.1.5-rc.1','0.1.5-rc.3','0.1.6-alpha.1','0.1.7-alpha.1','0.1.7','0.2.0-alpha.1'])console.log(v,s.satisfies(v,r))"
+node -e "const s=require('/usr/local/lib/node_modules/npm/node_modules/semver');const r='>=0.1.5-rc.1 || >=0.1.6-0 || >=0.1.7-0 || >=0.2.1-rc.3';for(const v of ['0.1.5-rc.1','0.1.5-rc.3','0.1.6-alpha.1','0.1.7-alpha.1','0.1.7','0.2.0-alpha.1','0.2.1-rc.3'])console.log(v,s.satisfies(v,r))"
 ```
 
 `dsh` 主包内**没有** `engines` / `dshhub` 的消费点（全量 grep 无命中），所以这两个字段不参与

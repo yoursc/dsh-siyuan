@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "思源笔记",
+    "description": "将思源笔记接入 DeepSeek Harness，提供检索、读取、写入、移动、删除、日记、属性工具和独立设置页。"
+  }
+}
