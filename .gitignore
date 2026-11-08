@@ -1,5 +1,7 @@
 node_modules/
 .npm-cache/
+# 发布时把 npm 凭据写在这里（HOME 下的 .npmrc 在容器里写不进），绝不能提交
+.npm-rc/
 tmp/
 npm-debug.log*
 *.log
