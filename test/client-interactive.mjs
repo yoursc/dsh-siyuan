@@ -92,7 +92,12 @@ function createFetchStub({ overrides = {}, network = false, timeout = false, han
     if (override !== undefined) {
       if (override.rawText !== undefined) return new Response(override.rawText, { status: override.status ?? 200 })
       if (override.httpStatus !== undefined) return new Response('{}', { status: override.httpStatus })
-      if (override.ok === false) return Response.json({ ok: false, error: { message: override.message ?? 'boom' } })
+      if (override.ok === false) {
+        return Response.json({
+          ok: false,
+          error: override.hint === undefined ? { message: override.message ?? 'boom' } : { message: override.message ?? 'boom', hint: override.hint },
+        })
+      }
       return Response.json({ ok: true, value: override.value ?? null })
     }
     if (method === 'getState') return Response.json({ ok: true, value: stateForFetch })
@@ -261,6 +266,21 @@ console.log('— 错误态 —')
   startCase({ overrides: { getState: { rawText: '<html>nope</html>' } } })
   await mount()
   check('宿主返回非 JSON 时显示错误而不是崩', /读取配置失败/.test(messages()), messages())
+}
+{
+  // 围栏拒绝（域名访问未声明 --trusted-host）时，只显示"forbidden"会让人以为插件坏了。
+  startCase({
+    overrides: {
+      getState: { ok: false, message: 'forbidden', hint: '宿主不信任 Host "notes.example.com"，请加 --trusted-host notes.example.com' },
+    },
+  })
+  await mount()
+  check('宿主 hint 跟错误一起显示', /读取配置失败：forbidden（宿主不信任 Host/.test(messages()), messages())
+}
+{
+  startCase({ overrides: { getState: { ok: false, message: '凭据服务不可用', hint: '凭据服务不可用' } } })
+  await mount()
+  check('hint 与 message 相同时不重复显示', /读取配置失败：凭据服务不可用$/.test(messages().trim()) && !/（凭据服务不可用）/.test(messages()), messages())
 }
 {
   startCase({ overrides: { getState: { httpStatus: 500 } } })

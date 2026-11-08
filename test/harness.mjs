@@ -237,10 +237,12 @@ console.log('— 路由：基础分支 —')
   const noHost = await call('getState', {}, { headers: {} })
   check('缺少 Host 头被拒 (403)', noHost.status === 403, JSON.stringify(noHost.payload))
 
-  // 受信 Host 白名单：非 loopback 的部署域名靠 webRuntime.trustedHosts 放行。
+  // 受信 Host 白名单：非 loopback 的部署域名靠 webStartup.trustedHosts 放行。
+  // 早先这里读的是 webRuntime——dsh 里没有该服务，替身给了对象，所以"白名单生效"一直是绿的，
+  // 真机上却是 undefined → 域名访问一律 403。现在按真实服务名与真实形状构造。
   const routes3 = []
   const trustedInject = {
-    get: (name) => (name === 'webRuntime' ? { trustedHosts: ['dsh.example.com'] } : undefined),
+    get: (name) => (name === 'webStartup' ? { trustedHosts: ['dsh.example.com'] } : undefined),
     effect: (callback) => {
       callback()
       return () => {}
@@ -268,11 +270,79 @@ console.log('— 路由：基础分支 —')
     const request = makeRequest({ url: '/siyuan/api/getState', headers })
     const response = makeResponse()
     await routes3[0].handler(request, response)
-    return response.status
+    return { status: response.status, payload: JSON.parse(response.body || 'null') }
   }
-  check('受信 Host 白名单内放行', (await trustedCall({ host: 'dsh.example.com' })) === 200)
-  check('受信 Host 之外的域名仍被拒', (await trustedCall({ host: 'other.example.com' })) === 403)
-  check('受信 Host 带跨站标记仍被拒', (await trustedCall({ host: 'dsh.example.com', 'sec-fetch-site': 'cross-site' })) === 403)
+  check('受信 Host 白名单内放行', (await trustedCall({ host: 'dsh.example.com' })).status === 200)
+  check('受信 Host 之外的域名仍被拒', (await trustedCall({ host: 'other.example.com' })).status === 403)
+  check('受信 Host 带跨站标记仍被拒', (await trustedCall({ host: 'dsh.example.com', 'sec-fetch-site': 'cross-site' })).status === 403)
+  check(
+    '受信 Host 的 origin 也必须与它一致',
+    (await trustedCall({ host: 'dsh.example.com', origin: 'https://evil.example.com' })).status === 403
+  )
+  check(
+    '受信 Host 同源 origin 放行（含端口写法）',
+    (await trustedCall({ host: 'dsh.example.com:8443', origin: 'https://dsh.example.com:8443' })).status === 200
+  )
+  const rejected = await trustedCall({ host: 'other.example.com' })
+  check(
+    '被拒时回显 Host 并给出 --trusted-host 线索',
+    /other\.example\.com/.test(rejected.payload?.error?.hint ?? '') &&
+      /--trusted-host other\.example\.com/.test(rejected.payload?.error?.hint ?? ''),
+    rejected.payload?.error?.hint
+  )
+  check('被拒信封仍是 forbidden、不含服务端状态', rejected.payload?.error?.message === 'forbidden', JSON.stringify(rejected.payload))
+
+  // 监听器绑定地址（反向代理回源到容器 IP 时，浏览器发出的 Host 就是它）：dsh 的 /api 认，
+  // 这个围栏以前不认——同一页面「模型能用、思源设置页 403」。绑定地址只按 IP 字面量认。
+  /** 用指定的 webServer.host 挂载一份插件，返回"按这份路由发请求"的调用器。 */
+  const mountWithBind = (bindHost) => {
+    const served = []
+    const boundCtx = {
+      get: (name) => (name === 'webServer' && bindHost !== undefined ? { host: bindHost } : undefined),
+      effect: (callback) => {
+        callback()
+        return () => {}
+      },
+      logger: { info: () => {}, warn: () => {} },
+      tools: { register: () => () => {} },
+      webServer: {
+        register: (route) => {
+          served.push(route)
+          return () => {}
+        },
+      },
+    }
+    plugin.apply({
+      ...boundCtx,
+      inject: (_deps, callback) => callback(boundCtx),
+      get tools() {
+        throw new Error('cannot get property "tools" without inject')
+      },
+      get webServer() {
+        throw new Error('cannot get property "webServer" without inject')
+      },
+    })
+    return async (headers) => {
+      const request = makeRequest({ url: '/siyuan/api/getState', headers })
+      const response = makeResponse()
+      await served[0].handler(request, response)
+      return response.status
+    }
+  }
+  check('监听器绑定地址（容器 IP）放行', (await mountWithBind('172.18.0.5')({ host: '172.18.0.5:3080' })) === 200)
+  // 绑定地址之外的 IP 仍被拒：绑定地址只授权它自己，不是"任何非 loopback 地址都放行"。
+  check('绑定地址之外的 IP 仍被拒', (await mountWithBind('172.18.0.5')({ host: '172.18.0.9:3080' })) === 403)
+  // 不测 `0.0.0.0`：dsh 的 webserver 在加载时就拒绝通配绑定（"unspecified (wildcard) address,
+  // which is not supported"），bindHost 不可能是它；真出现了也只放行 Host 同为 0.0.0.0 的请求，
+  // 而反向代理回传的 Host 是域名或 IP，域名那条仍要 --trusted-host。
+  check('没有 webServer 服务时仍只认本机', (await mountWithBind(undefined)({ host: '127.0.0.1:3080' })) === 200)
+
+  const nonLoopback = await trustedCall({ host: '172.18.0.5:3080' })
+  check(
+    '未声明的非 loopback Host：提示里给出带端口的 --trusted-host 写法',
+    /--trusted-host 172\.18\.0\.5:3080/.test(nonLoopback.payload?.error?.hint ?? ''),
+    nonLoopback.payload?.error?.hint
+  )
 
   const wrongMethod = await call('getState', {}, { method: 'GET' })
   check('非 POST 返回 405', wrongMethod.status === 405)

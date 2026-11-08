@@ -47,6 +47,13 @@
   不要跟"可达"挤在连接卡标题行——那样会被读成"这个连接只读"。
   没有凭据服务时回退到进程环境变量（因此真实部署常见 `source: "env"`、页面输入框置灰）。
   草稿 token 只在探测请求里出现（宿主的 `tokenState.source` 会回 `"draft"`），不会被落盘。
+- **设置页路由的信任围栏**：`/siyuan/api/*` 只接受本机、监听器绑定地址或部署声明的受信
+  authority 发起的同源请求，判据与 dsh 自己的 `/api` 围栏逐条一致（`isTrustedRequest` /
+  `trustBoundary`）：受信列表**只能**从 `ctx.get('webStartup').trustedHosts` 读
+  （`dsh web --trusted-host`），绑定地址从 `ctx.get('webServer').host` 读；**不要**改回任何
+  自定义服务名——读错名字不报错，只是永远拿到 `undefined`，表现为"本机能用、域名 403"。
+  被拒时信封带 `hint`（回显 Host + `--trusted-host` 写法），客户端把它显示在错误文案里。
+  替身测试必须按真实服务名与真实形状构造，字段名猜错时两边会一起错、测试仍然绿。
 - **工具动态注册**：`syncTools()` 按**逐个工具**的开关注册/释放；分组挂在工具定义上
   （`definition.group`），设置页据此排列与算「已启用 N / 共 M」。
 - **取消**：工具调用的 `AbortSignal` 经 `createApi(ctx, signal)` 贯通到 HTTP 请求（`AbortSignal.any`
@@ -333,6 +340,7 @@ GitHub 地址按 `github.com/yoursc/dsh-siyuan` 填写，与账号不一致时�
 | 设置页保存的改动没生效（如 `danger` 开关） | 页面上的改动必须先点**那张卡自己的**保存按钮才落盘 | 无需改码，操作上注意 |
 | 没配 token 时点地址下面的「测试连接」报红，用户以为地址填错了 | 它其实是"三条探测全过才算成功"：没 token 时两条鉴权探测必然失败，红字落在**地址**卡里。可下方探明细里版本号明明读得到——地址是通的 | 拆成两个按钮：「测试地址」不带 token，只对地址下结论（`ok`/`auth`/`fail` 三态，`auth` 用琥珀色而不是红色）；「测试 token」测鉴权且**测不过也允许保存**。`siyuanFetch` 拆出 `sendSiyuanRequest`，让地址探测能自己分辨"连不上"与"被拒绝"（`SiYuanError.kind`） |
 | 取消工具调用后删除仍跑完整个复核 | 信号只在入口检查一次，`sleep` 不可中断 | 信号贯通到请求与退避等待；抛官方 `AbortError` |
+| **域名访问设置页「读取配置失败：forbidden」，`http://127.0.0.1:3080` 却正常**（2026-11-08 真机复现） | `/siyuan/api/*` 围栏读 `ctx.get('webRuntime')?.trustedHosts`，**dsh 里没有这个服务**（真名 `webStartup`），永远是 `undefined`：只有 loopback Host 放行，域名与反代回源到容器 IP 的 Host 一律 403。dsh 自己的 `/api` 认 `webStartup.trustedHosts` + `webServer.host`，所以页面能开、模型工具能用，只有设置页被拒。替身 `get()` 里给了 `webRuntime` 对象，所以「受信 Host 白名单内放行」一直绿着 | 判据与 dsh 的 `isTrustedApiRequest` 对齐：取 `webStartup.trustedHosts`（`host:port` 精确、裸 `host` 任意端口）+ `webServer.host`（只认 IP 字面量）+ 127/8 全部 loopback；跨站标记与含端口的 Origin 比较不变。403 信封附 `hint`，设置页显示在错误文案里。`test/harness.mjs` 替身改成真实服务名与形状，新增绑定地址 / 端口 Origin / hint 用例，并实测摘掉修复会红。**声明域名仍需启动时 `--trusted-host <域名>` 并重启**——围栏不因此放宽成"任何域名都放行"，那等于把 setToken 交给 DNS rebinding |
 | 往不存在的笔记本写文档"成功" | `assertNotebook` 只看"有没有填"，替身也不校验 notebook | 写入前查 `lsNotebooks` 确认存在且未关闭；替身同步收紧 |
 
 ## 环境注意
