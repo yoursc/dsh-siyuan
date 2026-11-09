@@ -42,6 +42,13 @@
     `unreachable`（连不上，**说"未被验证"而不是"token 不对"**）/`error`/`empty`。
   - `testToken` **纯只读**（不写配置、不写凭据），且**不作为保存的门禁**：测不过照样能存。
     设置页上唯一与 `writable` 无关的按钮就是「测试 token」——env 来的 token 恰恰最需要反馈。
+- **连接层**（`createConnection`）：解析「配置 + token」并发出请求的**唯一入口**。
+  三个方法各管一件事——`config(overrides)` 只解析配置（草稿地址优先于落盘值）、
+  `state(overrides)` 额外带 token 的来源/可写性（设置页显示用）、`call(path, payload, opts)`
+  发请求（可复用 `resolved` 避免重复读盘）。**新增连接行为时改这里，不要去工具或 handler 里
+  再写一份 `readConfig()`**——历史上同一套规则抄了三份，改一处漏两处正是域名 bug 的同类成因。
+  唯一保留的直调是写路径（`syncTools` 读工具开关、`updateConfig` 写配置），它们与连接无关。
+  工具侧用 `api.notebook(id)` 做笔记本校验，因此工具不必自己读配置。
 - **凭据**：token 存宿主凭据库的 `SIYUAN_TOKEN`，页面只报告状态（徽标文案如
   `token 已配置 · 来自环境变量 · 页面不可改`），永不回显值。徽标住在 **API token 卡**，
   不要跟"可达"挤在连接卡标题行——那样会被读成"这个连接只读"。
